@@ -2,6 +2,26 @@
 History
 =======
 
+0.7.0 (2026-11-16)
+------------------
+
+* Support GitLab groups: ``--group`` / ``GITLAB_GROUP_ID`` for all commands
+  (group issues, group boards, group labels; changes are written via the
+  issue's project).
+* ``sort-board-issues``: new single-pass sort algorithm (no fixed 10 s pauses),
+  stable for equal due dates, issues without due date always at the end,
+  ``--label`` can be given multiple times, verification after sorting.
+* ``migrate-issues``: only adds/removes the two labels (other label changes
+  made in the meantime are kept); dry-run output fixed.
+* Email templates are shipped inside the package.
+* Email sending reports failures (exit code 1) instead of always printing
+  "Email has been sent"; no empty admin email from ``check-missing-assignee``.
+* ``GITLAB_TOKEN`` is checked correctly; ``GITLAB_PRIVATE_TOKEN`` accepted as alias.
+* New ``--project`` CLI option.
+* ``sort-board-issues``: ``--sort-by`` (``due-date``, ``priority`` or a
+  combination) and ``--priority-labels`` / ``ISQA_PRIORITY_LABELS``.
+* GitLab CI: sort rules per board list (``ISQA_SORT_RULES``).
+
 0.6.2 (2026-08-08)
 ------------------
 

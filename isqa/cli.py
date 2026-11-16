@@ -3,9 +3,8 @@ import traceback
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-import gitlab
 import typer
 from dotenv import load_dotenv
 from rich.table import Table
@@ -14,19 +13,21 @@ from typing_extensions import Annotated
 
 from isqa.common import __save_json__
 from isqa.configs import console, logger, settings
-from isqa.constants import ISSUES_REORDER_ATTEMPT_SLEEP_SECONDS
-from isqa.exceptions import IsQAGitlabNoRepository, IsQAWrongCLIParams
+from isqa.exceptions import IsQAWrongCLIParams
 from isqa.helpers import (
     __print_and_fail__,
     check_if_label_exists,
     get_assignee_data,
-    get_board_id_by_name,
-    get_gitlab_credentials_envs,
-    get_gitlab_project,
+    get_board,
+    get_board_label_names,
+    get_gitlab_scope,
+    parse_priority_labels,
+    parse_sort_by,
     print_issue_to_console,
     print_issues_in_label,
     send_notification_from_cli,
     sort_issues_in_label,
+    update_issue_labels,
 )
 from isqa.notifier import (
     send_email_due_date_expired,
@@ -36,12 +37,23 @@ from isqa.notifier import (
 from isqa.version import package_summary, package_version
 
 app = typer.Typer(
-    help="`isqa` utility for quality assurance of GitLab issues. Helps managing issues of a repository."
+    help="`isqa` utility for quality assurance of GitLab issues. "
+    "Helps managing issues of a project or of a whole group."
 )
 
 
 class MigrationConditionChoice(str, Enum):
     due_date = "due-date"
+
+
+def _today_utc():
+    return datetime.now(timezone.utc).date()
+
+
+def _due_date_expired(issue, today) -> bool:
+    if not issue.due_date:
+        return False
+    return datetime.strptime(issue.due_date, "%Y-%m-%d").date() < today
 
 
 @app.callback(invoke_without_command=True)
@@ -77,6 +89,23 @@ def main(
             resolve_path=True,
         ),
     ] = None,
+    group: Annotated[
+        Optional[str],
+        typer.Option(
+            "--group",
+            "-g",
+            help="ID or full path of a GitLab group. Overrides 'GITLAB_GROUP_ID' "
+            "and makes all commands work on the issues/boards of the whole group.",
+        ),
+    ] = None,
+    project: Annotated[
+        Optional[str],
+        typer.Option(
+            "--project",
+            "-p",
+            help="ID or full path of a GitLab project. Overrides 'GITLAB_PROJECT_ID'.",
+        ),
+    ] = None,
     version: Annotated[
         bool,
         typer.Option(
@@ -103,7 +132,7 @@ def main(
             "Dry run mode:",
             Text(
                 f"{settings.dry_run}",
-                style=f"bold {"red" if not settings.dry_run else "green"}",
+                style=f"bold {'red' if not settings.dry_run else 'green'}",
             ),
         )
     elif settings.dry_run:
@@ -128,6 +157,14 @@ def main(
     else:
         load_dotenv()
 
+    # CLI parameters win over the environment
+    if group:
+        os.environ["GITLAB_GROUP_ID"] = group
+    if project:
+        os.environ["GITLAB_PROJECT_ID"] = project
+        if not group:
+            os.environ.pop("GITLAB_GROUP_ID", None)
+
     if version:
         if settings.verbose:
             table = Table()
@@ -139,12 +176,20 @@ def main(
             console.print(table)
         else:
             console.print(f"{package_version()}", style="yellow")
-        exit(0)
+        raise typer.Exit(0)
 
     # If a subcommand was provided, don't exit; continue to the subcommand.
     # Otherwise, Typer will handle exiting or showing the help page.
     if ctx.invoked_subcommand is not None:
         return
+
+
+def _save_json_if_verbose(data):
+    if settings.verbose:
+        console.print(
+            "JSON have seen saved into: ",
+            Text(__save_json__(data), style="bold cyan"),
+        )
 
 
 @app.command()
@@ -157,31 +202,20 @@ def list_issues(
     ),
 ):
     """
-    Lists all issues for the repository.
+    Lists all issues of the project or group.
     """
 
-    gitlab_url, repo_id, token = get_gitlab_credentials_envs()
-
-    try:
-        project = get_gitlab_project(repo_id, gitlab_url, token=token)
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
-
-    if not project:
-        raise IsQAGitlabNoRepository(
-            f"Unable to connect to Gitlab repository: {repo_id}"
-        )
+    scope, scope_name = get_gitlab_scope()
 
     console.print(
         "Get",
         Text(state, style="bold yellow"),
-        "issues for project:",
-        Text(repo_id, style="bold green"),
+        "issues for:",
+        Text(scope_name, style="bold green"),
     )
 
     try:
-
-        issues = project.issues.list(state=state, get_all=True, iterator=True)
+        issues = scope.issues.list(state=state, get_all=True, iterator=True)
         issue_data = []
         for issue in issues:
             issue_data.append(issue.asdict())
@@ -194,12 +228,7 @@ def list_issues(
             return
 
         console.print("\nTotal issues:", Text(f"{len(issue_data)}", style="bold cyan"))
-
-        if settings.verbose:
-            console.print(
-                "JSON have seen saved into: ",
-                Text(__save_json__(issue_data), style="bold cyan"),
-            )
+        _save_json_if_verbose(issue_data)
 
     except Exception as e:
         __print_and_fail__(f"An unexpected error occurred: {e}")
@@ -235,106 +264,59 @@ def list_board_issues(
     ] = False,
 ):
     """
-    Lists all issues with a label used as columns on a GitLab board.
-    Only the first board is processed. A specific board ID could be provided.
+    Lists all issues with a label used as columns on a GitLab board
+    (project board or group board). Only the first board is processed.
+    A specific board ID or name could be provided.
     """
-    gitlab_url, repo_id, token = get_gitlab_credentials_envs()
-
-    try:
-        project = get_gitlab_project(repo_id, gitlab_url, token=token)
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
+    scope, _ = get_gitlab_scope()
 
     if label is not None:
-        check_if_label_exists(project, label)
+        check_if_label_exists(scope, label)
 
     try:
+        board = get_board(scope, board_id, board_name)
+        if board is None:
+            return
 
-        console.print("\nFetching project boards...")
-        boards = project.boards.list()
-
-        if not boards:
+        label_names = get_board_label_names(board)
+        if not label_names:
             console.print(
-                Text("No Issue Boards found for this project.", style="bold yellow")
+                Text(f"No label lists found for board {board.name}.", style="bold yellow")
             )
             return
 
-        board = None
-        if board_name:
-            board_id = get_board_id_by_name(project, board_name)
+        board_data = {"board_id": board.id, "board_name": board.name, "lists": {}}
 
-        if board_id:
-            try:
-                board = project.boards.get(board_id)
-            except gitlab.exceptions.GitlabGetError:
-                __print_and_fail__(f"Board with ID '{board_id}' not found.")
-        else:
-            board = boards[0]
-            console.print(
-                f"Using the first board found (ID: {board.id}):",
-                Text(board.name, style="bold green"),
-            )
-
-        lists = board.lists.list()
-        if not lists:
-            console.print(
-                Text(f"No lists found for board {board.name}.", style="bold yellow")
-            )
-            return
-
-        board_data = {
-            "board_id": board.id,
-            "board_name": board.name,
-            "lists": {},
-        }
-
-        boards_labels = set()
-        for list_obj in lists:
-            b_list = board.lists.get(list_obj.id)
-            list_label_name = b_list.label["name"]
-
+        for list_label_name in label_names:
             if label is not None and list_label_name.lower() != label.lower():
                 continue
 
-            boards_labels.add(list_label_name)
-            board_data["lists"][list_label_name] = []
-            label_issues = project.issues.list(
-                labels=[list_label_name], state="opened", get_all=True, iterator=True
+            label_issues = list(
+                scope.issues.list(
+                    labels=[list_label_name],
+                    state="opened",
+                    order_by="relative_position",
+                    sort="asc",
+                    get_all=True,
+                    iterator=True,
+                )
             )
-
-            print_issues_in_label(
-                label_issues,
-                list_label_name,
-            )
-
-            for _, issue in enumerate(label_issues):
-                board_data["lists"][list_label_name].append(issue.asdict())
+            print_issues_in_label(label_issues, list_label_name)
+            board_data["lists"][list_label_name] = [i.asdict() for i in label_issues]
 
         # print issues without labels
         if without_labels:
-            issues_without_labels = []
-            issues_without_labels_label = "issues-without-labels"
-            board_data["lists"][issues_without_labels_label] = []
-            all_issues = project.issues.list(
-                labels=[], state="opened", get_all=True, iterator=True
-            )
-            for issue in all_issues:
-                if len(boards_labels.intersection(issue.labels)) == 0:
-                    issues_without_labels.append(issue)
-                    board_data["lists"][issues_without_labels_label].append(
-                        issue.asdict()
-                    )
+            key = "issues-without-labels"
+            board_labels = set(label_names)
+            issues_without_labels = [
+                issue
+                for issue in scope.issues.list(state="opened", get_all=True, iterator=True)
+                if not board_labels.intersection(issue.labels)
+            ]
+            print_issues_in_label(issues_without_labels, label_name=key)
+            board_data["lists"][key] = [i.asdict() for i in issues_without_labels]
 
-            print_issues_in_label(
-                issues_without_labels,
-                label_name=issues_without_labels_label,
-            )
-
-        if settings.verbose:
-            console.print(
-                "JSON have seen saved into: ",
-                Text(__save_json__(board_data), style="bold cyan"),
-            )
+        _save_json_if_verbose(board_data)
 
     except Exception as e:
         __print_and_fail__(f"An unexpected error occurred: {e}")
@@ -361,78 +343,67 @@ def migrate_issues(
     ),
 ):
     """
-    Migrated issues from one label to another label. Each issue must meet specific conditions (e.g., 'due-date').
+    Migrates issues from one label to another label. Each issue must meet
+    specific conditions (e.g., 'due-date' = due date is before today).
     """
 
-    gitlab_url, repo_id, token = get_gitlab_credentials_envs()
-
-    try:
-        project = get_gitlab_project(repo_id, gitlab_url, token=token)
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
-
-    if not project:
-        raise IsQAGitlabNoRepository(
-            f"Unable to connect to Gitlab repository: {repo_id}"
-        )
-
-    check_if_label_exists(project, from_label)
-    check_if_label_exists(project, to_label)
-
+    if not from_label or not to_label:
+        raise IsQAWrongCLIParams("--from-label and --to-label must be provided")
     if not check_condition:
         raise IsQAWrongCLIParams("--check-condition must be provided")
+
+    scope, scope_name = get_gitlab_scope()
+
+    check_if_label_exists(scope, from_label)
+    check_if_label_exists(scope, to_label)
 
     console.print(
         "Get",
         Text(state, style="bold yellow"),
-        "issues for project:",
-        Text(repo_id, style="bold green"),
+        "issues with label",
+        Text(from_label, style="bold blue"),
+        "for:",
+        Text(scope_name, style="bold green"),
     )
 
     try:
-
-        issues = project.issues.list(state=state, get_all=True, iterator=True)
+        issues = scope.issues.list(
+            state=state, labels=[from_label], get_all=True, iterator=True
+        )
         issue_data = []
-
-        now = datetime.now(timezone.utc).date()
+        today = _today_utc()
 
         for issue in issues:
-            if issue.labels is not None and len(issue.labels) != 0:
+            if from_label not in (issue.labels or []):
+                continue
 
-                current_labels = issue.labels
-                new_labels = [label for label in current_labels if label != from_label]
+            condition_satisfied = False
+            if check_condition == MigrationConditionChoice.due_date:
+                condition_satisfied = _due_date_expired(issue, today)
 
-                if new_labels != current_labels:
-                    condition_satisfied = False
-                    # check due-date condition
-                    if check_condition.value == "due-date":
-                        if issue.due_date:
-                            due_date = datetime.strptime(
-                                issue.due_date, "%Y-%m-%d"
-                            ).date()
-                            if due_date < now:
-                                condition_satisfied = True
+            if not condition_satisfied:
+                continue
 
-                    if condition_satisfied:
-                        print_issue_to_console(issue)
-                        issue_data.append(issue.asdict())
-                        new_labels.append(to_label)
-                        if not settings.dry_run:
-                            issue.labels = new_labels
-                            issue.save()
-                        else:
-                            console.print("No labels will be migrated")
+            print_issue_to_console(issue)
+            issue_data.append(issue.asdict())
 
-                        console.print(
-                            Text("✅", style="bold green"),
-                            Text(
-                                f"Issue labels updated successfully from -> ",
-                                style="bold white",
-                            ),
-                            Text(f"'{from_label}'", style="bold blue"),
-                            "to",
-                            Text(f"'{to_label}'", style="bold green"),
-                        )
+            if settings.dry_run:
+                console.print(
+                    Text("  [dry-run] would migrate", style="bold yellow"),
+                    Text(f"'{from_label}'", style="bold blue"),
+                    "->",
+                    Text(f"'{to_label}'", style="bold green"),
+                )
+                continue
+
+            update_issue_labels(issue, add_labels=[to_label], remove_labels=[from_label])
+            console.print(
+                Text("✅", style="bold green"),
+                Text("Issue labels updated successfully from ->", style="bold white"),
+                Text(f"'{from_label}'", style="bold blue"),
+                "to",
+                Text(f"'{to_label}'", style="bold green"),
+            )
 
         if not issue_data:
             console.print(
@@ -441,12 +412,7 @@ def migrate_issues(
             return
 
         console.print("\nTotal issues:", Text(f"{len(issue_data)}", style="bold cyan"))
-
-        if settings.verbose:
-            console.print(
-                "JSON have seen saved into: ",
-                Text(__save_json__(issue_data), style="bold cyan"),
-            )
+        _save_json_if_verbose(issue_data)
 
     except Exception as e:
         __print_and_fail__(f"An unexpected error occurred: {e}")
@@ -466,111 +432,206 @@ def sort_board_issues(
         "-n",
         help="Specific Board name to inspect. Defaults to the first board found.",
     ),
-    label: Optional[str] = typer.Option(
+    label: Optional[list[str]] = typer.Option(
         None,
         "--label",
         "-l",
-        help="Specific label name to be sorted. Defaults to all labels found.",
+        help="Label (board list) to be sorted. Can be given multiple times. "
+        "Defaults to all label lists of the board.",
     ),
     desc: Annotated[
         bool,
         typer.Option(
             "--descending",
             "-desc",
-            help="Sort issues in descending order by due date",
+            help="Sort issues in descending order by due date (only affects 'due-date').",
         ),
     ] = False,
+    sort_by: str = typer.Option(
+        "due-date",
+        "--sort-by",
+        "-s",
+        help="Comma separated sort keys, most important first: 'due-date', "
+        "'priority'. E.g. 'due-date,priority' = by due date, same due date by priority.",
+    ),
+    priority_labels: Optional[str] = typer.Option(
+        None,
+        "--priority-labels",
+        "-P",
+        envvar="ISQA_PRIORITY_LABELS",
+        help="Comma separated priority labels, highest first "
+        "(e.g. 'Prio_High,Prio_Medium,Prio_Low'). Issues without one go last. "
+        "Can also be set via ISQA_PRIORITY_LABELS.",
+    ),
 ):
     """
-    Sorts all issues with a given label of a particular GitLab board.
-    Only the first board is processed. A specific board ID could be provided.
+    Sorts the issues of the label lists of a GitLab board (project board or
+    group board). Default: by due date, issues without due date at the end.
+    With --sort-by also by priority labels. Issues that are equal in all sort
+    keys keep their manual order.
+    Only the first board is processed. A specific board ID or name could be provided.
     """
-    gitlab_url, repo_id, token = get_gitlab_credentials_envs()
+    sort_keys = parse_sort_by(sort_by)
+    prio_labels = parse_priority_labels(priority_labels)
+    if "priority" in sort_keys and not prio_labels:
+        __print_and_fail__(
+            "Sorting by 'priority' needs --priority-labels (or ISQA_PRIORITY_LABELS)."
+        )
+
+    scope, _ = get_gitlab_scope()
+
+    for name in list(label or []) + (list(prio_labels) if "priority" in sort_keys else []):
+        check_if_label_exists(scope, name)
+
+    console.print(
+        "Sort by:",
+        Text(" > ".join(sort_keys), style="bold yellow"),
+        *(
+            ["| Priorities:", Text(" > ".join(prio_labels), style="bold yellow")]
+            if "priority" in sort_keys
+            else []
+        ),
+    )
 
     try:
-        project = get_gitlab_project(repo_id, gitlab_url, token=token)
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
+        board = get_board(scope, board_id, board_name)
+        if board is None:
+            return
 
-    if label is not None:
-        check_if_label_exists(project, label)
-
-    try:
-
-        console.print("\nFetching project boards...")
-        boards = project.boards.list()
-
-        if not boards:
+        label_names = get_board_label_names(board)
+        if not label_names:
             console.print(
-                Text("No Issue Boards found for this project.", style="bold yellow")
+                Text(f"No label lists found for board {board.name}.", style="bold yellow")
             )
             return
 
-        board = None
-        if board_name:
-            board_id = get_board_id_by_name(project, board_name)
+        if label:
+            missing = [name for name in label if name not in label_names]
+            if missing:
+                __print_and_fail__(
+                    f"Label(s) {missing} are not used as lists on board '{board.name}'."
+                )
+            label_names = [name for name in label_names if name in label]
 
-        if board_id:
-            try:
-                board = project.boards.get(board_id)
-            except gitlab.exceptions.GitlabGetError:
-                __print_and_fail__(f"Board with ID '{board_id}' not found.")
-        else:
-            board = boards[0]
-            console.print(
-                f"Using the first board found (ID: {board.id}):",
-                Text(board.name, style="bold green"),
-            )
-
-        lists = board.lists.list()
-        if not lists:
-            console.print(
-                Text(f"No lists found for board {board.name}.", style="bold yellow")
-            )
-            return
-
-        for list_obj in lists:
-            b_list = board.lists.get(list_obj.id)
-            list_label_name = b_list.label["name"]
-
-            if label is not None and label != list_label_name:
-                continue
-
+        for list_label_name in label_names:
             console.print(
                 Text("\n⚙️", style="bold cyan"),
                 "Sorting issues of the label (part of board):",
                 Text(list_label_name, style="bold yellow"),
             )
 
-            label_issues = project.issues.list(
-                labels=[list_label_name], state="opened", get_all=True, iterator=True
+            moves = sort_issues_in_label(
+                scope, list_label_name, desc, sort_keys, prio_labels
             )
 
-            if len(label_issues) > 1:
-                max_runs = len(label_issues) - 1
-                estimate_time = max_runs * ISSUES_REORDER_ATTEMPT_SLEEP_SECONDS
+            if moves == 0:
+                console.print(Text("Already sorted, nothing to do", style="bold white"))
+            elif settings.dry_run:
                 console.print(
-                    Text("⚠️", style="bold yellow"),
-                    "Estimated max sorting time (seconds): ",
-                    Text(f"{estimate_time}", style="bold yellow"),
+                    Text("[dry-run]", style="bold yellow"),
+                    f"{moves} issue(s) would be moved.",
                 )
-                for index in range(max_runs):
-                    if settings.verbose:
-                        console.print(
-                            "Running iteration: ",
-                            Text(str(index + 1), style="bold yellow"),
-                        )
-                    if sort_issues_in_label(project, list_label_name, desc):
-                        break
             else:
-                console.print(Text(f"Nothing to sort here", style="bold white"))
+                console.print(
+                    Text("✅", style="bold green"),
+                    Text("Successfully sorted issues for label:", style="bold white"),
+                    Text(f"{list_label_name}", style="bold green"),
+                    f"({moves} issue(s) moved)",
+                )
 
-            console.print(
-                Text("✅", style="bold green"),
-                Text(f"Successfully sorted issues for label:", style="bold white"),
-                Text(f"{list_label_name}", style="bold green"),
+    except typer.Exit:
+        raise
+    except Exception as e:
+        __print_and_fail__(f"An unexpected error occurred: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# Checks with optional email notification
+# --------------------------------------------------------------------------- #
+
+
+def _run_check(
+    state: str,
+    has_problem: Callable,
+    notify_admin: bool,
+    notify_assignee: bool,
+    send_email_func: Callable,
+    show_due_date: bool = False,
+):
+    """Common implementation of the `check-*` commands."""
+
+    scope, scope_name = get_gitlab_scope()
+
+    console.print(
+        "Get",
+        Text(state, style="bold yellow"),
+        "issues for:",
+        Text(scope_name, style="bold green"),
+    )
+
+    try:
+        issues = scope.issues.list(state=state, get_all=True, iterator=True)
+        issue_data = []
+        issues_with_problems = {}
+        admin_email = os.environ.get("EMAIL_ADMIN_TO_NOTIFY")
+
+        def _add(email, name, issue):
+            issues_with_problems.setdefault(email, []).append(
+                {"link": issue.web_url, "title": issue.title, "assignee": name}
             )
 
+        for issue in issues:
+            issue_data.append(issue.asdict())
+            try:
+                if not has_problem(issue):
+                    continue
+
+                print_issue_to_console(
+                    issue, due_date=issue.due_date if show_due_date else None
+                )
+
+                if notify_admin:
+                    _add(admin_email, "Admin", issue)
+
+                if notify_assignee:
+                    assignee, assignee_email = get_assignee_data(issue)
+                    if assignee is None or assignee_email is None:
+                        assignee, assignee_email = "Admin", admin_email
+                    _add(assignee_email, assignee, issue)
+
+            except Exception:
+                logger.error(traceback.format_exc())
+
+        problems = sum(len(v) for v in issues_with_problems.values())
+
+        if problems > 0:
+            all_sent = send_notification_from_cli(
+                notify_admin,
+                notify_assignee,
+                issues_with_problems,
+                scope_name,
+                send_email_func,
+            )
+            if not all_sent:
+                __print_and_fail__("At least one notification email could not be sent.")
+        else:
+            console.print(
+                Text("\nNo one will be notified this time.", style="bold yellow")
+            )
+
+        if not issue_data:
+            console.print(
+                Text("No issues found for the specified criteria.", style="bold yellow")
+            )
+            return
+
+        console.print(
+            "\nTotal issues:", Text(f"{len(issue_data)}", style="bold yellow")
+        )
+        _save_json_if_verbose(issue_data)
+
+    except typer.Exit:
+        raise
     except Exception as e:
         __print_and_fail__(f"An unexpected error occurred: {e}")
 
@@ -597,106 +658,15 @@ def check_due_date(
     """
     Checks all issues if the 'due date' has passed. Optionally notifies the admin or assignee.
     """
-
-    gitlab_url, repo_id, token = get_gitlab_credentials_envs()
-    repo_name = repo_id
-
-    try:
-        project = get_gitlab_project(repo_id, gitlab_url, token=token)
-        repo_name = project.name
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
-
-    if not project:
-        raise IsQAGitlabNoRepository(
-            f"Unable to connect to Gitlab repository: {repo_id}"
-        )
-
-    console.print(
-        "Get",
-        Text(state, style="bold yellow"),
-        "issues for project:",
-        Text(repo_id, style="bold green"),
+    today = _today_utc()
+    _run_check(
+        state,
+        lambda issue: _due_date_expired(issue, today),
+        notify_admin,
+        notify_assignee,
+        send_email_due_date_expired,
+        show_due_date=True,
     )
-
-    try:
-        issues = project.issues.list(state=state, get_all=True, iterator=True)
-        issue_data = []
-
-        now = datetime.now(timezone.utc).date()
-        issues_with_problems = {}
-        for issue in issues:
-            issue_data.append(issue.asdict())
-            try:
-                if issue.due_date:
-                    due_date = datetime.strptime(issue.due_date, "%Y-%m-%d").date()
-                    if due_date < now:
-                        print_issue_to_console(issue, due_date=due_date)
-
-                        if notify_admin:
-                            assignee, assignee_email = "Admin", os.environ.get(
-                                "EMAIL_ADMIN_TO_NOTIFY"
-                            )
-                            if assignee_email not in issues_with_problems:
-                                issues_with_problems[assignee_email] = []
-                            issues_with_problems[assignee_email].append(
-                                {
-                                    "link": issue.web_url,
-                                    "title": issue.title,
-                                    "assignee": assignee,
-                                }
-                            )
-
-                        if notify_assignee:
-                            assignee, assignee_email = get_assignee_data(issue)
-                            if assignee is None or assignee_email is None:
-                                assignee, assignee_email = "Admin", os.environ.get(
-                                    "EMAIL_ADMIN_TO_NOTIFY"
-                                )
-                            if assignee_email not in issues_with_problems:
-                                issues_with_problems[assignee_email] = []
-                            issues_with_problems[assignee_email].append(
-                                {
-                                    "link": issue.web_url,
-                                    "title": issue.title,
-                                    "assignee": assignee,
-                                }
-                            )
-
-            except Exception:
-                logger.error(traceback.format_exc())
-
-        if len(issues_with_problems) > 0:
-            send_notification_from_cli(
-                notify_admin,
-                notify_assignee,
-                issues_with_problems,
-                repo_name,
-                send_email_due_date_expired,
-            )
-        else:
-            console.print(
-                Text("\nNo one will be notified this time.", style="bold yellow")
-            )
-
-        if not issue_data:
-            console.print(
-                Text("No issues found for the specified criteria.", style="bold yellow")
-            )
-            return
-
-        console.print(
-            "\nTotal issues:", Text(f"{len(issue_data)}", style="bold yellow")
-        )
-
-        if settings.verbose:
-            console.print(
-                "JSON have seen saved into: ",
-                Text(__save_json__(issue_data), style="bold cyan"),
-            )
-
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
 
 
 @app.command()
@@ -714,81 +684,13 @@ def check_missing_assignee(
     """
     Checks all issues if the 'assignee' has not been set. Optionally notifies the admin.
     """
-
-    gitlab_url, repo_id, token = get_gitlab_credentials_envs()
-    repo_name = repo_id
-
-    try:
-        project = get_gitlab_project(repo_id, gitlab_url, token=token)
-        repo_name = project.name
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
-
-    if not project:
-        raise IsQAGitlabNoRepository(
-            f"Unable to connect to Gitlab repository: {repo_id}"
-        )
-
-    console.print(
-        "Get",
-        Text(state, style="bold yellow"),
-        "issues for project:",
-        Text(repo_id, style="bold green"),
+    _run_check(
+        state,
+        lambda issue: getattr(issue, "assignee", None) is None,
+        notify_admin,
+        False,
+        send_email_missing_assignee,
     )
-
-    try:
-        issues = project.issues.list(state=state, get_all=True, iterator=True)
-        issue_data = []
-        issues_with_problems = {}
-        assignee, assignee_email = "Admin", os.environ.get("EMAIL_ADMIN_TO_NOTIFY")
-        issues_with_problems[assignee_email] = []
-
-        for issue in issues:
-            issue_data.append(issue.asdict())
-            try:
-                if issue.assignee is None:
-                    print_issue_to_console(issue)
-                    issues_with_problems[assignee_email].append(
-                        {
-                            "link": issue.web_url,
-                            "title": issue.title,
-                            "assignee": assignee,
-                        }
-                    )
-            except Exception:
-                logger.error(traceback.format_exc())
-
-        if len(issues_with_problems) > 0:
-            send_notification_from_cli(
-                notify_admin,
-                False,
-                issues_with_problems,
-                repo_name,
-                send_email_missing_assignee,
-            )
-        else:
-            console.print(
-                Text("\nNo one will be notified this time.", style="bold yellow")
-            )
-
-        if not issue_data:
-            console.print(
-                Text("No issues found for the specified criteria.", style="bold yellow")
-            )
-            return
-
-        console.print(
-            "\nTotal issues:", Text(f"{len(issue_data)}", style="bold yellow")
-        )
-
-        if settings.verbose:
-            console.print(
-                "JSON have seen saved into: ",
-                Text(__save_json__(issue_data), style="bold cyan"),
-            )
-
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
 
 
 @app.command()
@@ -811,104 +713,10 @@ def check_missing_label(
     """
     Checks all issues if a label is missing. Optionally notifies the admin or assignee.
     """
-
-    gitlab_url, repo_id, token = get_gitlab_credentials_envs()
-    repo_name = repo_id
-
-    try:
-        project = get_gitlab_project(repo_id, gitlab_url, token=token)
-        repo_name = project.name
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
-
-    if not project:
-        raise IsQAGitlabNoRepository(
-            f"Unable to connect to Gitlab repository: {repo_id}"
-        )
-
-    console.print(
-        "Get",
-        Text(state, style="bold yellow"),
-        "issues for project:",
-        Text(repo_id, style="bold green"),
+    _run_check(
+        state,
+        lambda issue: not issue.labels,
+        notify_admin,
+        notify_assignee,
+        send_email_missing_label,
     )
-
-    try:
-        issues = project.issues.list(state=state, get_all=True, iterator=True)
-        issue_data = []
-        issues_with_problems = {}
-
-        for issue in issues:
-            issue_data.append(issue.asdict())
-            try:
-                if issue.labels is None or len(issue.labels) == 0:
-                    print_issue_to_console(issue)
-
-                    if notify_admin:
-                        assignee, assignee_email = "Admin", os.environ.get(
-                            "EMAIL_ADMIN_TO_NOTIFY"
-                        )
-                        if assignee_email not in issues_with_problems:
-                            issues_with_problems[assignee_email] = []
-                        issues_with_problems[assignee_email].append(
-                            {
-                                "link": issue.web_url,
-                                "title": issue.title,
-                                "assignee": assignee,
-                            }
-                        )
-
-                    if notify_assignee:
-                        assignee, assignee_email = get_assignee_data(issue)
-                        if assignee is None or assignee_email is None:
-                            assignee, assignee_email = "Admin", os.environ.get(
-                                "EMAIL_ADMIN_TO_NOTIFY"
-                            )
-                        if assignee_email not in issues_with_problems:
-                            issues_with_problems[assignee_email] = []
-                        issues_with_problems[assignee_email].append(
-                            {
-                                "link": issue.web_url,
-                                "title": issue.title,
-                                "assignee": assignee,
-                            }
-                        )
-
-            except Exception:
-                logger.error(traceback.format_exc())
-
-        if len(issues_with_problems) > 0:
-            send_notification_from_cli(
-                notify_admin,
-                notify_assignee,
-                issues_with_problems,
-                repo_name,
-                send_email_missing_label,
-            )
-        else:
-            console.print(
-                Text("\nNo one will be notified this time.", style="bold yellow")
-            )
-
-        if not issue_data:
-            console.print(
-                Text("No issues found for the specified criteria.", style="bold yellow")
-            )
-            return
-
-        console.print(
-            "\nTotal issues:", Text(f"{len(issue_data)}", style="bold yellow")
-        )
-
-        if settings.verbose:
-            console.print(
-                "JSON have seen saved into: ",
-                Text(__save_json__(issue_data), style="bold cyan"),
-            )
-
-    except Exception as e:
-        __print_and_fail__(f"An unexpected error occurred: {e}")
-
-
-if __name__ == "__main__":
-    app()

@@ -50,7 +50,7 @@ This tool requires access to your GitLab repository (*scopes*: `api`, `read_api`
     ```env
     GITLAB_URL=https://gitlab.your-company.com
     GITLAB_PROJECT_ID="Project_Name"
-    GITLAB_PRIVATE_TOKEN=Your_Access_Token_Here
+    GITLAB_TOKEN=Your_Access_Token_Here
     ```
     > **Note:** You can generate a Access Token (AT) from your GitLab repository under **Settings > Access Tokens**. Make sure to check upon creation the following *scopes*: `api`, `read_api`.
 
@@ -105,7 +105,7 @@ Here is a list of examples, which demonstrate the core features of the utility:
     ```
     isqa migrate-issues --from-label "In Progress" --to-label "administration" --check-condition due-date
     ```
-* Sorting the issues on a board within the label `projects` (**NOTE**: it make take a while, because after each `sort` pass, the script will be pause for `10` seconds in order not to overload server )
+* Sorting the issues on a board within the label `projects` (issues without due date are placed at the end; issues with the same due date keep their manual order)
     ```
     isqa sort-board-issues --label projects
     ```
@@ -113,6 +113,79 @@ Here is a list of examples, which demonstrate the core features of the utility:
     ```
     isqa sort-board-issues --label projects --descending
     ```
+
+* Sorting several lists of a board at once
+    ```
+    isqa sort-board-issues --board-name Team --label ToDo --label "In Progress"
+    ```
+
+* Sorting by priority labels: by due date, and issues with the same due date by priority
+    ```
+    isqa sort-board-issues --label ToDo --sort-by due-date,priority \
+        --priority-labels "11_Prio_High,12_Prio_Medium,13_Prio_Low"
+    ```
+    Sort keys (most important first): `due-date` (no due date at the end; `--descending`
+    reverses only this key) and `priority` (order given by `--priority-labels` or
+    `ISQA_PRIORITY_LABELS`, highest first; issues without priority label at the end;
+    with several priority labels the highest one counts). `priority,due-date` sorts by
+    priority first. Issues equal in all keys keep their manual order.
+
+## 👥 Working on GitLab groups
+
+All commands can work on a whole GitLab **group** (incl. all subgroups and
+their projects) instead of a single project:
+
+* via environment / `.env` file
+    ```env
+    GITLAB_URL=https://gitlab.your-company.com
+    GITLAB_GROUP_ID="my-group/my-subgroup"
+    GITLAB_TOKEN=Your_Access_Token_Here
+    ```
+* or via CLI parameter (overrides the environment)
+    ```
+    isqa --group my-group list-issues
+    isqa --group my-group/my-subgroup sort-board-issues --board-name Team
+    isqa --group my-group migrate-issues --from-label Waiting --to-label ToDo --check-condition due-date
+    isqa --group my-group check-due-date --notify-assignee
+    ```
+
+Notes:
+
+* `sort-board-issues` and `list-board-issues` use the **group boards**. Sorting
+  works across projects (GitLab positions issues per top-level group).
+* Labels are looked up in the group and its parent groups, so the labels used
+  for migration/sorting should be **group labels**.
+* Use a **group access token** (or a personal token of a bot user) with scope
+  `api` and at least the role `Reporter`/`Planner` in the group.
+* If both `GITLAB_GROUP_ID` and `GITLAB_PROJECT_ID` are set, the group wins.
+  `--project` on the CLI switches back to project mode.
+
+## 📧 Email notifications
+
+The email templates are shipped with the package (override the folder with
+`ISQA_EMAIL_TEMPLATES_DIR`). Settings (environment or `extra.env`):
+
+```env
+SMTP_SERVER=mail.your-company.com
+SMTP_PORT=587               # STARTTLS; 465 = SSL
+EMAIL_SENDER=isqa@your-company.com
+EMAIL_ADMIN_TO_NOTIFY=admin@your-company.com
+# optional - leave out for a relay that accepts mail without login
+EMAIL_LOGIN=
+EMAIL_PASSWORD=
+```
+
+If an email cannot be sent, the command exits with code `1`.
+
+## 🧪 Tests
+
+End-to-end tests run the CLI against an in-memory fake of the GitLab API
+(`tests/fake_gitlab.py`) and a local SMTP server:
+
+```
+pip install -e . pytest aiosmtpd
+pytest tests
+```
 
 ## CLI UI
 

@@ -90,7 +90,7 @@ def _send_html_email(
 
     if not config.is_valid:
         logger.error("Cannot send email. Configuration is invalid.")
-        return
+        return False
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -127,15 +127,18 @@ def _send_html_email(
         server.quit()
 
         logger.debug(f"HTML email sent successfully to: {recipient_email}!")
+        return True
 
     except smtplib.SMTPAuthenticationError:
         logger.error(
             "SMTP Authentication Failed. Check your credentials (e.g., App Password for Gmail) and permissions."
         )
+        return False
     except Exception as e:
         logger.error(
             f"An unexpected error occurred during email sending to {recipient_email}: {e}"
         )
+        return False
     finally:
         if server:
             try:
@@ -151,9 +154,13 @@ def _configure_and_send_email(
 
     if not email_config.is_valid:
         logger.error("Cannot send email. Configuration is invalid.")
-        return
+        return False
 
-    _send_html_email(
+    if not html_body or not text_body:
+        logger.error("Cannot send email. Email body could not be rendered.")
+        return False
+
+    return _send_html_email(
         recipient_email=user_email,
         subject=subject,
         text_content=text_body,
@@ -170,14 +177,14 @@ def _render_templates(
         logger.error(
             f"Failed to generate HTML email body. Template: {template_file_html}"
         )
-        return
+        return None, None
 
     text_body = _render_single_template(template_file_txt, template_context)
-    if not html_body:
+    if not text_body:
         logger.error(
             f"Failed to generate text email body. Template: {template_file_txt}"
         )
-        return
+        return None, None
 
     return html_body, text_body
 
@@ -197,7 +204,7 @@ def send_email_on_problem(
     html_body, text_body = _render_templates(
         template_context, "problem.html", "problem.txt"
     )
-    _configure_and_send_email(user_email, subject, html_body, text_body)
+    return _configure_and_send_email(user_email, subject, html_body, text_body)
 
 
 def send_email_due_date_expired(
@@ -215,7 +222,7 @@ def send_email_due_date_expired(
     html_body, text_body = _render_templates(
         template_context, "due-date-expired.html", "due-date-expired.txt"
     )
-    _configure_and_send_email(user_email, subject, html_body, text_body)
+    return _configure_and_send_email(user_email, subject, html_body, text_body)
 
 
 def send_email_missing_assignee(
@@ -233,7 +240,7 @@ def send_email_missing_assignee(
     html_body, text_body = _render_templates(
         template_context, "missing-assignee.html", "missing-assignee.txt"
     )
-    _configure_and_send_email(user_email, subject, html_body, text_body)
+    return _configure_and_send_email(user_email, subject, html_body, text_body)
 
 
 def send_email_missing_label(
@@ -251,4 +258,4 @@ def send_email_missing_label(
     html_body, text_body = _render_templates(
         template_context, "missing-label.html", "missing-label.txt"
     )
-    _configure_and_send_email(user_email, subject, html_body, text_body)
+    return _configure_and_send_email(user_email, subject, html_body, text_body)

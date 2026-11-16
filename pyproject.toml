@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "isqa"
-description = "A CLI utility for quality assurance of GitLab issues."
-version = "0.6.2"
+description = "A CLI utility for quality assurance of GitLab issues (projects and groups)."
+version = "0.7.0"
 readme = "README.md"
 authors = [
   {name = "vdmitriyev"}
@@ -54,9 +54,14 @@ documentation = "https://vdmitriyev.github.io/isqa/"
 where = ["."]
 include = ["isqa*"]
 
+[tool.setuptools.package-data]
+isqa = ["templates/*.html", "templates/*.txt"]
+
 [dependency-groups]
 dev = [
     "black>=26.3.1",
     "isort>=8.0.1",
     "pre-commit>=4.5.1",
+    "pytest>=8.0",
+    "aiosmtpd>=1.4",
 ]
