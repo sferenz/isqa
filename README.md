@@ -105,6 +105,14 @@ Here is a list of examples, which demonstrate the core features of the utility:
     ```
     isqa migrate-issues --from-label "In Progress" --to-label "administration" --check-condition due-date
     ```
+* Adding a default label to all issues that have no board-column label, so that every issue shows up on the board
+    ```
+    # column labels given explicitly (repeat -c for each column)
+    isqa add-default-label --to-label ToDo -c ToDo -c Doing -c "Waiting for feedback"
+    # or: use the label lists of a board as column labels
+    isqa add-default-label --to-label ToDo --board-name Team
+    ```
+    The default label itself always counts as a column label.
 * Sorting the issues on a board within the label `projects` (issues without due date are placed at the end; issues with the same due date keep their manual order)
     ```
     isqa sort-board-issues --label projects

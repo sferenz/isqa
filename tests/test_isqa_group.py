@@ -407,3 +407,79 @@ def test_priority_config_errors(gl):
     assert rc != 0 and "Unknown sort key" in out
     rc, out = run("-g", "offis/team", "sort-board-issues", "-s", "priority", "-P", "11_Prio_High,Typo", ok=False)
     assert rc != 0 and "not found" in out
+
+
+# --------------------------------------------------------------------------- #
+# add-default-label
+# --------------------------------------------------------------------------- #
+
+COLUMNS = ["ToDo_ideas", "ToDo_date", "ToDo", "Doing", "Wait", "Termin durchführen", "39_Supervision",
+           "Discussion_SFz", "Info_SFz", "Discussion_SCO", "Info_SCO", "Discussion_ANi", "Decision_ANi",
+           "Info_ANi", "Discussion_EFr_SFz_ANi", "info_backlog"]
+
+
+def _col_args(cols=COLUMNS):
+    out = []
+    for c in cols:
+        out += ["-c", c]
+    return out
+
+
+def test_add_default_label_explicit_columns(gl):
+    S, run = gl
+    S.labels[("group", 10)] |= set(COLUMNS) | {"bug", t_prio := "11_Prio_High"}
+    a = add_issue(S, 100, [], title="no labels")
+    b = add_issue(S, 101, ["bug", t_prio], title="only other labels")
+    c = add_issue(S, 102, ["Termin durchführen"], title="has column with space")
+    e = add_issue(S, 100, ["info_backlog", "bug"], title="has column")
+    f = add_issue(S, 101, ["ToDo"], title="already ToDo")
+    g = add_issue(S, 100, [], state="closed", title="closed")
+    h = add_issue(S, 200, [], title="other group")
+    _, out = run("-g", "offis", "add-default-label", "-t", "ToDo", *_col_args())
+    assert a["labels"] == ["ToDo"]
+    assert b["labels"] == ["bug", t_prio, "ToDo"]
+    assert c["labels"] == ["Termin durchführen"]
+    assert e["labels"] == ["info_backlog", "bug"]
+    assert f["labels"] == ["ToDo"]
+    assert g["labels"] == [] and h["labels"] == []
+    assert "Total issues: 2" in out
+    # second run: nothing left
+    S.calls.clear()
+    _, out = run("-g", "offis", "add-default-label", "-t", "ToDo", *_col_args())
+    assert not [c for c in S.calls if c[0] == "PUT"] and "nothing to do" in out
+
+
+def test_add_default_label_columns_from_board(gl):
+    S, run = gl
+    a = add_issue(S, 100, ["Termin_durchführen"], title="not on board Team")
+    b = add_issue(S, 101, ["Waiting"], title="on board Team")
+    run("-g", "offis/team", "add-default-label", "-t", "ToDo", "-n", "Team")
+    assert a["labels"] == ["Termin_durchführen", "ToDo"]
+    assert b["labels"] == ["Waiting"]
+
+
+def test_add_default_label_to_label_counts_as_column(gl):
+    S, run = gl
+    a = add_issue(S, 100, ["ToDo"])
+    b = add_issue(S, 100, [])
+    run("-g", "offis", "add-default-label", "-t", "ToDo", "-c", "Waiting")
+    assert a["labels"] == ["ToDo"] and b["labels"] == ["ToDo"]
+
+
+def test_add_default_label_dry_run_and_typos(gl):
+    S, run = gl
+    a = add_issue(S, 100, [])
+    _, out = run("-d", "-g", "offis", "add-default-label", "-t", "ToDo", "-c", "Waiting")
+    assert a["labels"] == [] and "would add" in out
+    rc, out = run("-g", "offis", "add-default-label", "-t", "ToDo", "-c", "Wating", ok=False)
+    assert rc != 0 and "not found" in out and a["labels"] == []
+    rc, out = run("-g", "offis", "add-default-label", "-t", "Todo2", "-c", "Waiting", ok=False)
+    assert rc != 0 and a["labels"] == []
+
+
+def test_add_default_label_project_mode(gl):
+    S, run = gl
+    a = add_issue(S, 100, [])
+    b = add_issue(S, 101, [])
+    run("-p", "offis/team/alpha", "add-default-label", "-t", "ToDo", "-c", "Waiting")
+    assert a["labels"] == ["ToDo"] and b["labels"] == []

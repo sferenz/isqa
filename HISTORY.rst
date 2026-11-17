@@ -21,6 +21,9 @@ History
 * ``sort-board-issues``: ``--sort-by`` (``due-date``, ``priority`` or a
   combination) and ``--priority-labels`` / ``ISQA_PRIORITY_LABELS``.
 * GitLab CI: sort rules per board list (``ISQA_SORT_RULES``).
+* New command ``add-default-label``: adds a default label (e.g. ``ToDo``) to
+  issues without any column label (explicit ``--column-label`` list or the
+  label lists of a board). CI job ``label-issues-without-column``.
 
 0.6.2 (2026-08-08)
 ------------------

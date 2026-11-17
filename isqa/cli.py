@@ -419,6 +419,119 @@ def migrate_issues(
 
 
 @app.command()
+def add_default_label(
+    to_label: str = typer.Option(
+        ...,
+        "--to-label",
+        "-t",
+        help="Label that is added to issues without any column label (e.g. 'ToDo').",
+    ),
+    column_label: Optional[list[str]] = typer.Option(
+        None,
+        "--column-label",
+        "-c",
+        help="Label that counts as a board column. Can be given multiple times. "
+        "If omitted, the label lists of the board are used.",
+    ),
+    board_id: Optional[int] = typer.Option(
+        None,
+        "--board-id",
+        "-b",
+        help="Board whose label lists are the column labels (if no --column-label "
+        "is given). Defaults to the first board found.",
+    ),
+    board_name: Optional[str] = typer.Option(
+        None,
+        "--board-name",
+        "-n",
+        help="Board name, alternative to --board-id.",
+    ),
+    state: str = typer.Option(
+        "opened",
+        "--state",
+        "-s",
+        help="Filter issues by state: opened, closed, or all.",
+    ),
+):
+    """
+    Adds a default label (e.g. 'ToDo') to all issues that have none of the
+    column labels, so that every issue shows up in a column of the board.
+    The column labels are given explicitly (--column-label) or taken from the
+    label lists of a board. The default label itself always counts as a column label.
+    """
+    scope, scope_name = get_gitlab_scope()
+
+    if column_label:
+        columns = list(dict.fromkeys(column_label))  # unique, keep order
+        source = "given column labels"
+    else:
+        board = get_board(scope, board_id, board_name)
+        if board is None:
+            __print_and_fail__("No board found to read the column labels from.")
+        columns = get_board_label_names(board)
+        source = f"label lists of board '{board.name}'"
+        if not columns:
+            __print_and_fail__(f"Board '{board.name}' has no label lists.")
+
+    if to_label not in columns:
+        columns.append(to_label)
+
+    for name in columns:
+        check_if_label_exists(scope, name)
+
+    console.print(
+        "Column labels",
+        f"({source}):",
+        Text(", ".join(columns), style="bold yellow"),
+    )
+    console.print(
+        "Get",
+        Text(state, style="bold yellow"),
+        "issues without column label for:",
+        Text(scope_name, style="bold green"),
+    )
+
+    try:
+        column_set = set(columns)
+        issue_data = []
+
+        for issue in scope.issues.list(state=state, get_all=True, iterator=True):
+            if column_set.intersection(issue.labels or []):
+                continue
+
+            print_issue_to_console(issue)
+            issue_data.append(issue.asdict())
+
+            if settings.dry_run:
+                console.print(
+                    Text("  [dry-run] would add", style="bold yellow"),
+                    Text(f"'{to_label}'", style="bold green"),
+                )
+                continue
+
+            update_issue_labels(issue, add_labels=[to_label])
+            console.print(
+                Text("✅", style="bold green"),
+                "Label added:",
+                Text(f"'{to_label}'", style="bold green"),
+            )
+
+        if not issue_data:
+            console.print(
+                Text("All issues have a column label, nothing to do.", style="bold blue")
+            )
+            return
+
+        console.print("\nTotal issues:", Text(f"{len(issue_data)}", style="bold cyan"))
+        _save_json_if_verbose(issue_data)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        __print_and_fail__(f"An unexpected error occurred: {e}")
+
+
+@app.command()
 def sort_board_issues(
     board_id: Optional[int] = typer.Option(
         None,
