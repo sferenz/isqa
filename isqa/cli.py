@@ -22,12 +22,12 @@ from isqa.helpers import (
     get_board_label_names,
     get_gitlab_scope,
     label_exists,
+    sort_board_lists,
     parse_priority_labels,
     parse_sort_by,
     print_issue_to_console,
     print_issues_in_label,
     send_notification_from_cli,
-    sort_issues_in_label,
     update_issue_labels,
 )
 from isqa.notifier import (
@@ -532,6 +532,20 @@ def add_default_label(
         __print_and_fail__(f"An unexpected error occurred: {e}")
 
 
+def _parse_rule(rule: str, default_keys: tuple) -> tuple:
+    """'ToDo;In Progress = due-date,priority' -> (['ToDo', 'In Progress'], keys).
+    Columns '*' = all lists of the board."""
+    if "=" in rule:
+        cols, crit = rule.split("=", 1)
+        keys = parse_sort_by(crit) if crit.strip() else default_keys
+    else:
+        cols, keys = rule, default_keys
+    columns = [c.strip() for c in cols.split(";") if c.strip()]
+    if not columns:
+        __print_and_fail__(f"Rule without columns: '{rule}'")
+    return columns, keys
+
+
 @app.command()
 def sort_board_issues(
     board_id: Optional[int] = typer.Option(
@@ -553,6 +567,15 @@ def sort_board_issues(
         help="Label (board list) to be sorted. Can be given multiple times. "
         "Defaults to all label lists of the board.",
     ),
+    rule: Optional[list[str]] = typer.Option(
+        None,
+        "--rule",
+        "-r",
+        help="Sort rule '<columns> = <keys>', e.g. 'ToDo;Doing = due-date,priority'. "
+        "Columns separated by ';', '*' = all lists. Can be given multiple times; "
+        "if an issue is in several lists with contradicting orders, the rule "
+        "(and column) given first wins. Alternative to --label/--sort-by.",
+    ),
     desc: Annotated[
         bool,
         typer.Option(
@@ -566,13 +589,14 @@ def sort_board_issues(
         "--sort-by",
         "-s",
         help="Comma separated sort keys, most important first: 'due-date', "
-        "'priority'. E.g. 'due-date,priority' = by due date, same due date by priority.",
+        "'priority'. E.g. 'due-date,priority' = by due date, same due date by priority. "
+        "Default for rules without keys.",
     ),
     strict: Annotated[
         bool,
         typer.Option(
             "--strict",
-            help="Fail if a given --label does not exist or is not a list on the "
+            help="Fail if a given column label does not exist or is not a list on the "
             "board. Default: skip such labels with a warning.",
         ),
     ] = False,
@@ -589,13 +613,21 @@ def sort_board_issues(
     """
     Sorts the issues of the label lists of a GitLab board (project board or
     group board). Default: by due date, issues without due date at the end.
-    With --sort-by also by priority labels. Issues that are equal in all sort
-    keys keep their manual order.
+    With --sort-by also by priority labels, with --rule different keys per list.
+    Issues that are equal in all sort keys keep their manual order.
     Only the first board is processed. A specific board ID or name could be provided.
     """
-    sort_keys = parse_sort_by(sort_by)
+    default_keys = parse_sort_by(sort_by)
+    if rule and label:
+        __print_and_fail__("Use either --rule or --label, not both.")
+
+    rules = [_parse_rule(r, default_keys) for r in rule] if rule else [
+        (list(dict.fromkeys(label)) if label else ["*"], default_keys)
+    ]
+
+    uses_priority = any("priority" in keys for _, keys in rules)
     prio_labels = parse_priority_labels(priority_labels)
-    if "priority" in sort_keys and not prio_labels:
+    if uses_priority and not prio_labels:
         __print_and_fail__(
             "Sorting by 'priority' needs --priority-labels (or ISQA_PRIORITY_LABELS)."
         )
@@ -603,85 +635,91 @@ def sort_board_issues(
     scope, _ = get_gitlab_scope()
 
     # priority labels must exist, otherwise the priority order would be wrong
-    for name in prio_labels if "priority" in sort_keys else []:
+    for name in prio_labels if uses_priority else []:
         check_if_label_exists(scope, name)
 
-    requested = list(dict.fromkeys(label or []))  # unique, keep order
     if strict:
-        for name in requested:
-            check_if_label_exists(scope, name)
+        for columns, _ in rules:
+            for name in columns:
+                if name != "*":
+                    check_if_label_exists(scope, name)
 
-    console.print(
-        "Sort by:",
-        Text(" > ".join(sort_keys), style="bold yellow"),
-        *(
-            ["| Priorities:", Text(" > ".join(prio_labels), style="bold yellow")]
-            if "priority" in sort_keys
-            else []
-        ),
-    )
+    if uses_priority:
+        console.print("Priorities:", Text(" > ".join(prio_labels), style="bold yellow"))
 
     try:
         board = get_board(scope, board_id, board_name)
         if board is None:
             return
 
-        label_names = get_board_label_names(board)
-        if not label_names:
+        board_lists = get_board_label_names(board)
+        if not board_lists:
             console.print(
                 Text(f"No label lists found for board {board.name}.", style="bold yellow")
             )
             return
 
-        if requested:
-            missing = [name for name in requested if name not in label_names]
-            if missing and strict:
-                __print_and_fail__(
-                    f"Label(s) {missing} are not used as lists on board '{board.name}'."
-                )
-            for name in missing:
-                reason = (
-                    "is not a list on board"
-                    if label_exists(scope, name)
-                    else "does not exist (typo?) and is not a list on board"
-                )
-                console.print(
-                    Text("⚠️  WARNING:", style="bold yellow"),
-                    f"Label '{name}' {reason} '{board.name}' - skipped.",
-                )
-                logger.warning(f"Label '{name}' {reason} '{board.name}' - skipped.")
-            label_names = [name for name in label_names if name in requested]
-            if not label_names:
-                __print_and_fail__(
-                    f"None of the given labels {requested} is a list on board "
-                    f"'{board.name}'. Check the label names and the board."
-                )
+        # build the plan: (label, keys) in order of precedence
+        plan, seen, requested = [], set(), []
+        for columns, keys in rules:
+            for name in board_lists if columns == ["*"] else columns:
+                if name in seen:
+                    if columns != ["*"]:
+                        console.print(
+                            Text("⚠️  WARNING:", style="bold yellow"),
+                            f"Column '{name}' is used in several rules - the first one counts.",
+                        )
+                    continue
+                seen.add(name)
+                requested.append(name)
+                if name not in board_lists:
+                    if strict:
+                        __print_and_fail__(
+                            f"Label(s) ['{name}'] are not used as lists on board '{board.name}'."
+                        )
+                    reason = (
+                        "is not a list on board"
+                        if label_exists(scope, name)
+                        else "does not exist (typo?) and is not a list on board"
+                    )
+                    msg = f"Label '{name}' {reason} '{board.name}' - skipped."
+                    console.print(Text("⚠️  WARNING:", style="bold yellow"), msg)
+                    logger.warning(msg)
+                    continue
+                plan.append((name, keys))
 
-        for list_label_name in label_names:
-            console.print(
-                Text("\n⚙️", style="bold cyan"),
-                "Sorting issues of the label (part of board):",
-                Text(list_label_name, style="bold yellow"),
+        if not plan:
+            __print_and_fail__(
+                f"None of the given labels {requested} is a list on board "
+                f"'{board.name}'. Check the label names and the board."
             )
 
-            moves = sort_issues_in_label(
-                scope, list_label_name, desc, sort_keys, prio_labels
-            )
+        console.print("\nSort plan (first = highest precedence):")
+        for name, keys in plan:
+            console.print("  -", Text(name, style="bold yellow"), "by", " > ".join(keys))
 
-            if moves == 0:
-                console.print(Text("Already sorted, nothing to do", style="bold white"))
-            elif settings.dry_run:
-                console.print(
-                    Text("[dry-run]", style="bold yellow"),
-                    f"{moves} issue(s) would be moved.",
-                )
-            else:
+        result = sort_board_lists(scope, plan, desc, prio_labels)
+
+        console.print()
+        for name, res in result.items():
+            if res["sorted"]:
                 console.print(
                     Text("✅", style="bold green"),
-                    Text("Successfully sorted issues for label:", style="bold white"),
-                    Text(f"{list_label_name}", style="bold green"),
-                    f"({moves} issue(s) moved)",
+                    Text(name, style="bold green"),
+                    f"sorted ({res['moves']} move(s))"
+                    if not settings.dry_run
+                    else f"[dry-run] {res['moves']} move(s) planned",
                 )
+            else:
+                msg = (
+                    f"List '{name}' could not be fully sorted: issues are also in a "
+                    "column with higher precedence that needs a different order:"
+                )
+                console.print(Text("⚠️  WARNING:", style="bold yellow"), msg)
+                logger.warning(msg)
+                for line in res["conflicts"]:
+                    console.print("    -", line)
+                    logger.warning(f"    - {line}")
 
     except typer.Exit:
         raise

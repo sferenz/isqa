@@ -123,7 +123,7 @@ def test_group_sort_across_projects(gl):
     S.calls.clear()
     _, out = run("--group", "offis/team", "sort-board-issues", "--board-name", "Team")
     assert not [c for c in S.calls if c[1].endswith("/reorder")], out
-    assert "Already sorted" in out
+    assert "already sorted" in out
 
 
 def test_group_sort_descending_and_single_label(gl):
@@ -408,7 +408,7 @@ def test_sort_due_date_desc_then_priority(gl):
     S.calls.clear()
     _, out = run("-g", "offis/team", "sort-board-issues", "-l", "ToDo", "-s", "due-date,priority",
                  "-P", PRIO, "--descending")
-    assert not [c for c in S.calls if c[1].endswith("/reorder")] and "Already sorted" in out
+    assert not [c for c in S.calls if c[1].endswith("/reorder")] and "already sorted" in out
 
 
 def test_default_sort_unchanged_with_priority_labels_present(gl):
@@ -504,3 +504,96 @@ def test_add_default_label_project_mode(gl):
     b = add_issue(S, 101, [])
     run("-p", "offis/team/alpha", "add-default-label", "-t", "ToDo", "-c", "Waiting")
     assert a["labels"] == ["ToDo"] and b["labels"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Several lists with shared issues (--rule)
+# --------------------------------------------------------------------------- #
+
+def _sorted_like(S, label, keys, desc, pinned_labels, prio=PRIO.split(",")):
+    """Checks a list against the expected (constrained) order using isqa's own model."""
+    from types import SimpleNamespace
+    from isqa import helpers
+
+    issues = [SimpleNamespace(**{**S.issues[i], "labels": S.issues[i]["labels"]})
+              for i in list_order(S, label)]
+    pinned = {i.id for i in issues if set(pinned_labels) & set(i.labels)}
+    target = helpers._constrained_target(issues, pinned, desc, keys, tuple(prio))
+    return [i.id for i in target] == [i.id for i in issues]
+
+
+def test_rules_conflict_first_rule_wins_and_stable(gl):
+    S, run = gl
+    S.labels[("group", 10)] |= {H, M, L, "Discussion"}
+    S.boards[("group", 11)] = [{"id": 1, "name": "Team", "lists": ["ToDo", "Discussion"]}]
+    x = add_issue(S, 100, ["ToDo", "Discussion", L], due=d(1), pos=10, title="x")
+    y = add_issue(S, 100, ["ToDo", "Discussion", H], due=d(5), pos=20, title="y")
+    add_issue(S, 101, ["ToDo", M], due=d(3), pos=30, title="t")
+    add_issue(S, 101, ["Discussion", M], pos=5, title="disc-only")
+    args = ["-g", "offis/team", "sort-board-issues", "-P", PRIO,
+            "-r", "ToDo = due-date,priority", "-r", "Discussion = priority"]
+    _, out = run(*args)
+    assert _titles(S, "ToDo") == ["x", "t", "y"]                 # first rule wins
+    assert _titles(S, "Discussion") == ["disc-only", "x", "y"]   # free issue merged around pinned ones
+    assert "List 'Discussion' could not be fully sorted" in out
+    assert '"y" (due' in out and "also in 'ToDo'" in out
+    S.calls.clear()
+    run(*args)
+    assert not [c for c in S.calls if c[1].endswith("/reorder")]
+
+
+def test_rule_option_validation(gl):
+    S, run = gl
+    rc, out = run("-g", "offis/team", "sort-board-issues", "-r", "ToDo", "-l", "ToDo", ok=False)
+    assert rc != 0 and "either --rule or --label" in out
+    rc, out = run("-g", "offis/team", "sort-board-issues", "-r", "ToDo = prio", ok=False)
+    assert rc != 0 and "Unknown sort key" in out
+    add_issue(S, 100, ["ToDo"], due=d(2), pos=2)
+    add_issue(S, 100, ["ToDo"], due=d(1), pos=1)
+    _, out = run("-g", "offis/team", "sort-board-issues", "-r", "ToDo = due-date", "-r", "* = due-date",
+                 "-r", "ToDo = due-date")
+    assert "used in several rules" in out
+    assert "Sort plan" in out and "- ToDo by due-date" in out and "- Waiting by due-date" in out
+
+
+def test_verbose_output_shows_titles(gl):
+    S, run = gl
+    add_issue(S, 100, ["ToDo"], due=d(5), pos=1, title="Write the report")
+    add_issue(S, 100, ["ToDo"], due=d(1), pos=2, title="Book the room")
+    _, out = run("-v", "-g", "offis/team", "sort-board-issues", "-l", "ToDo")
+    assert "Current order of 'ToDo'" in out and "Target order of 'ToDo'" in out
+    assert "Write the report" in out and "Book the room" in out
+    assert 'move offis/team/alpha#2 "Book the room" (due' in out
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_rules_random_shared_issues(gl, seed):
+    S, run = gl
+    rnd = random.Random(1000 + seed)
+    cols = ["A", "B", "C", "D"]
+    S.labels[("group", 10)] |= set(cols) | {H, M, L}
+    S.boards[("group", 10)] = [{"id": 7, "name": "R", "lists": cols}]
+    used = set()
+    for k in range(rnd.randint(4, 30)):
+        labels = rnd.sample(cols, rnd.choice([1, 1, 1, 2, 2, 3]))
+        prio = rnd.choice([[H], [M], [L], []])
+        pos = rnd.randint(-3000, 3000)
+        while pos in used:
+            pos += 1
+        used.add(pos)
+        add_issue(S, rnd.choice([100, 101, 102]), labels + prio,
+                  due=rnd.choice([None, d(rnd.randint(-3, 8))]), pos=pos)
+    order = cols[:]
+    rnd.shuffle(order)
+    keys = [rnd.choice([("due-date",), ("priority",), ("due-date", "priority"), ("priority", "due-date")])
+            for _ in order]
+    desc = seed % 4 == 3
+    args = ["-g", "offis", "sort-board-issues", "-n", "R", "-P", PRIO] + (["--descending"] if desc else [])
+    for c, k in zip(order, keys):
+        args += ["-r", f"{c} = {','.join(k)}"]
+    _, out = run(*args)
+    for n, (c, k) in enumerate(zip(order, keys)):
+        assert _sorted_like(S, c, k, desc, order[:n]), (c, out)
+    S.calls.clear()
+    run(*args)
+    assert not [c for c in S.calls if c[1].endswith("/reorder")], "second run must not move anything"

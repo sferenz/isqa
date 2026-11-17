@@ -7,6 +7,7 @@ from typing import Optional, Union
 import gitlab
 import typer
 from gitlab.v4.objects import Group, Project, ProjectIssue
+from rich.table import Table
 from rich.text import Text
 
 from isqa.configs import console, logger, settings
@@ -492,12 +493,74 @@ def _fetch_label_issues(scope: Scope, label_name: str) -> list:
     )
 
 
-def _sort_pass(issues: list, target: list) -> int:
+def describe_issue(issue, priority_labels: tuple = ()) -> str:
+    """'#12 "Title" (due 2026-11-20, 11_Prio_High)' - for log output."""
+    details = [f"due {issue.due_date}" if issue.due_date else "no due date"]
+    prios = [l for l in (issue.labels or []) if l in priority_labels]
+    if priority_labels:
+        details.append(", ".join(prios) if prios else "no priority")
+    title = issue.title if len(issue.title) <= 60 else issue.title[:57] + "..."
+    return f'{issue_reference(issue)} "{title}" ({", ".join(details)})'
+
+
+def print_issue_order(heading: str, issues: list, priority_labels: tuple = ()):
+    """Prints a table of issues in the given order (verbose/debug output)."""
+    table = Table(title=heading, title_justify="left", show_lines=False)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Issue", style="blue", no_wrap=True)
+    table.add_column("Title")
+    table.add_column("Due date", no_wrap=True)
+    if priority_labels:
+        table.add_column("Priority", no_wrap=True)
+    for n, issue in enumerate(issues, 1):
+        row = [str(n), issue_reference(issue), issue.title, issue.due_date or "-"]
+        if priority_labels:
+            prios = [l for l in (issue.labels or []) if l in priority_labels]
+            row.append(", ".join(prios) or "-")
+        table.add_row(*row)
+    console.print(table)
+
+
+def _constrained_target(
+    issues: list,
+    pinned: set,
+    desc: bool = False,
+    sort_by: tuple = ("due-date",),
+    priority_labels: tuple = (),
+) -> list:
+    """Target order when some issues are pinned (must keep their current
+    relative order, because they belong to a list with higher precedence).
+
+    Free issues are sorted by the sort keys and merged around the pinned ones.
+    Without pinned issues this is exactly `_target_order`.
+    """
+    if not pinned:
+        return _target_order(issues, desc, sort_by, priority_labels)
+
+    order = {i.id: n for n, i in enumerate(issues)}
+    ranked = _target_order(issues, desc, sort_by, priority_labels)
+    rank = {i.id: n for n, i in enumerate(ranked)}  # position in the ideal order
+
+    free = [i for i in ranked if i.id not in pinned]
+    fixed = [i for i in issues if i.id in pinned]  # current order
+    target = []
+    while free and fixed:
+        f, p = free[0], fixed[0]
+        if (rank[f.id], order[f.id]) < (rank[p.id], order[p.id]):
+            target.append(free.pop(0))
+        else:
+            target.append(fixed.pop(0))
+    return target + free + fixed
+
+
+def _sort_pass(issues: list, target: list, pinned: set = frozenset(),
+               priority_labels: tuple = ()) -> int:
     """Brings `issues` (current order) into `target` order.
 
-    Walks through the target order and places each issue directly behind its
-    predecessor (between the predecessor and the predecessor's current
-    neighbour). Issues already at the right place are not touched.
+    Walks through the target order and places each free issue directly behind
+    its predecessor (between the predecessor and its current neighbour); the
+    first issue goes to the top. Pinned issues are never moved. Issues already
+    at the right place are not touched.
 
     Returns:
         int: number of reorder API calls (or simulated calls in dry-run mode)
@@ -505,31 +568,55 @@ def _sort_pass(issues: list, target: list) -> int:
     current = [i.id for i in issues]
     moves = 0
 
-    for prev, cur in zip(target, target[1:]):
-        p = current.index(prev.id)
-        if p + 1 < len(current) and current[p + 1] == cur.id:
-            continue  # already directly behind its predecessor
-
-        current.remove(cur.id)
-        p = current.index(prev.id)
-        next_id = current[p + 1] if p + 1 < len(current) else None
+    for n, cur in enumerate(target):
+        if cur.id in pinned:
+            continue
+        if n == 0:
+            if current[0] == cur.id:
+                continue
+            current.remove(cur.id)
+            before_id, after_id, prev = None, current[0], None
+            insert_at = 0
+        else:
+            prev = target[n - 1]
+            p = current.index(prev.id)
+            if p + 1 < len(current) and current[p + 1] == cur.id:
+                continue  # already directly behind its predecessor
+            current.remove(cur.id)
+            p = current.index(prev.id)
+            before_id = prev.id
+            after_id = current[p + 1] if p + 1 < len(current) else None
+            insert_at = p + 1
 
         if settings.verbose or settings.dry_run:
-            console.print(
-                "  move",
-                Text(issue_reference(cur), style="blue"),
-                "behind",
-                Text(issue_reference(prev), style="blue"),
-            )
+            if prev is None:
+                console.print("  move", Text(describe_issue(cur, priority_labels), style="blue"),
+                              "\n    to the top")
+            else:
+                console.print(
+                    "  move",
+                    Text(describe_issue(cur, priority_labels), style="blue"),
+                    "\n    behind",
+                    Text(describe_issue(prev, priority_labels), style="cyan"),
+                )
 
         if not settings.dry_run:
-            reorder_issue(cur, move_before_id=prev.id, move_after_id=next_id)
+            reorder_issue(cur, move_before_id=before_id, move_after_id=after_id)
             time.sleep(ISSUES_REORDER_DELAY_SECONDS)
 
-        current.insert(p + 1, cur.id)
+        current.insert(insert_at, cur.id)
         moves += 1
 
     return moves
+
+
+def _is_sorted(issues: list, target: list) -> bool:
+    return [i.id for i in target] == [i.id for i in issues]
+
+
+def _pinned_ids(issues: list, pinned_labels) -> set:
+    pinned_labels = set(pinned_labels or ())
+    return {i.id for i in issues if pinned_labels.intersection(i.labels or [])}
 
 
 def sort_issues_in_label(
@@ -538,10 +625,12 @@ def sort_issues_in_label(
     desc: bool = False,
     sort_by: tuple = ("due-date",),
     priority_labels: tuple = (),
+    pinned_labels: tuple = (),
 ) -> int:
     """Sorts the open issues with the given label (see `_target_order`).
 
-    Works for project boards and group boards (across projects).
+    Issues that also carry one of `pinned_labels` (lists with higher
+    precedence) are not moved. Works for project boards and group boards.
 
     Returns:
         int: number of issues that were moved (0 = already sorted)
@@ -551,31 +640,102 @@ def sort_issues_in_label(
 
     for attempt in range(1, ISSUES_REORDER_MAX_PASSES + 1):
         issues = _fetch_label_issues(scope, list_label_name)
-        if len(issues) < 2:
-            return total_moves
+        pinned = _pinned_ids(issues, pinned_labels)
+        target = _constrained_target(issues, pinned, desc, sort_by, priority_labels)
 
-        target = _target_order(issues, desc, sort_by, priority_labels)
-        if [i.id for i in target] == [i.id for i in issues]:
+        if len(issues) < 2 or _is_sorted(issues, target):
+            if settings.verbose and attempt == 1:
+                print_issue_order(
+                    f"Order of '{list_label_name}' (already sorted)", issues, priority_labels
+                )
             return total_moves
 
         if settings.verbose:
+            if attempt == 1:
+                print_issue_order(f"Current order of '{list_label_name}'", issues, priority_labels)
+                print_issue_order(f"Target order of '{list_label_name}'", target, priority_labels)
+                if pinned:
+                    console.print(
+                        "  pinned (also in a list with higher precedence):",
+                        ", ".join(issue_reference(i) for i in issues if i.id in pinned),
+                    )
             console.print("Sort pass:", Text(str(attempt), style="bold yellow"))
 
-        total_moves += _sort_pass(issues, target)
+        total_moves += _sort_pass(issues, target, pinned, priority_labels)
 
         if settings.dry_run:
             return total_moves
 
     # final check
     issues = _fetch_label_issues(scope, list_label_name)
-    target = _target_order(issues, desc, sort_by, priority_labels)
-    if [i.id for i in target] != [i.id for i in issues]:
+    pinned = _pinned_ids(issues, pinned_labels)
+    target = _constrained_target(issues, pinned, desc, sort_by, priority_labels)
+    if not _is_sorted(issues, target):
+        print_issue_order(f"Current order of '{list_label_name}'", issues, priority_labels)
+        print_issue_order(f"Target order of '{list_label_name}'", target, priority_labels)
         __print_and_fail__(
             f"Issues of label '{list_label_name}' could not be fully sorted "
             f"after {ISSUES_REORDER_MAX_PASSES} passes."
         )
 
     return total_moves
+
+
+def sort_board_lists(scope: Scope, plan: list, desc: bool, priority_labels: tuple) -> dict:
+    """Sorts several board lists consistently.
+
+    GitLab stores ONE position per issue, shared by all board lists the issue
+    appears in. Sorting one list can therefore change the order of another
+    list, if issues carry several column labels.
+
+    `plan` is a list of (label, sort_keys) in order of precedence. Lists are
+    sorted in this order; issues that also belong to a list sorted before are
+    pinned (not moved), so a list never breaks the order of a list with higher
+    precedence. Contradictions are reported per list.
+
+    Returns:
+        dict: label -> {"moves": int, "sorted": bool, "conflicts": [str]}
+    """
+    result = {}
+    done = []
+
+    for label, keys in plan:
+        console.print(
+            Text("\n⚙️", style="bold cyan"),
+            "Sorting list",
+            Text(label, style="bold yellow"),
+            "by",
+            Text(" > ".join(keys), style="bold yellow"),
+        )
+        moves = sort_issues_in_label(scope, label, desc, keys, priority_labels, tuple(done))
+        if moves == 0:
+            console.print(Text("  already sorted, nothing to do", style="white"))
+        elif settings.dry_run:
+            console.print(Text("  [dry-run]", style="bold yellow"), f"{moves} issue(s) would be moved.")
+        else:
+            console.print(Text("  ✅", style="bold green"), f"{moves} issue(s) moved.")
+
+        # compare with the ideal order (without pinned issues)
+        issues = _fetch_label_issues(scope, label)
+        pinned = _pinned_ids(issues, done)
+        ideal = _target_order(issues, desc, keys, priority_labels)
+        conflicts = []
+        if pinned and not _is_sorted(
+            _constrained_target(issues, pinned, desc, keys, priority_labels), ideal
+        ):
+            ideal_pos = {i.id: n for n, i in enumerate(ideal)}
+            constrained = _constrained_target(issues, pinned, desc, keys, priority_labels)
+            for n, issue in enumerate(constrained):
+                if issue.id in pinned and ideal_pos[issue.id] != n:
+                    others = [l for l in done if l in (issue.labels or [])]
+                    conflicts.append(
+                        f"{describe_issue(issue, priority_labels)} - also in "
+                        + ", ".join(f"'{o}'" for o in others)
+                    )
+        result[label] = {"moves": moves, "sorted": not conflicts, "conflicts": conflicts}
+        done.append(label)
+
+    return result
 
 
 def print_issues_in_label(label_issues, label_name: str):

@@ -5,6 +5,15 @@ History
 0.7.0 (2026-11-16)
 ------------------
 
+* ``sort-board-issues --rule '<lists> = <keys>'``: several lists with different
+  sort keys in one call. Issues that are in several lists are sorted
+  consistently: lists are processed in the given order, issues that belong to
+  a list with higher precedence are not moved, contradictions are reported
+  (before, sorting one list could silently break the order of another list).
+* Debug output: issue titles, due dates and priorities in all move messages;
+  ``--verbose`` prints current and target order of each list as a table.
+* Wider console output in CI logs (no terminal); ``COLUMNS`` overrides.
+
 * ``sort-board-issues``: labels given with ``--label`` that are not a list on
   the board (or do not exist) are skipped with a warning instead of failing;
   ``--strict`` restores the old behaviour. Fails only if none of them is a list.

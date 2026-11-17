@@ -123,6 +123,16 @@ Here is a list of examples, which demonstrate the core features of the utility:
     ```
 
 * Labels given with `--label` that are not a list on the board are skipped with a warning (use `--strict` to fail instead), so the same configuration can be used for repos with different boards
+* Different sort keys per list in one call (recommended when issues can be in several lists)
+    ```
+    isqa sort-board-issues -P "11_Prio_High,12_Prio_Medium,13_Prio_Low" \
+        --rule "ToDo_date;Wait = due-date,priority" --rule "ToDo;Doing = priority"
+    ```
+    GitLab stores one position per issue, shared by all lists the issue appears in.
+    Lists are sorted in the order given; issues that also belong to a list sorted
+    before are not moved. If two lists need contradicting orders, the list given
+    first wins and a warning names the affected issues. With `--verbose` the current
+    and target order of each list is printed (issue, title, due date, priority).
 * Sorting several lists of a board at once
     ```
     isqa sort-board-issues --board-name Team --label ToDo --label "In Progress"

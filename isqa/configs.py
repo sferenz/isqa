@@ -1,4 +1,5 @@
 import os
+import sys
 
 from rich.console import Console
 
@@ -6,7 +7,12 @@ from isqa.common import GlobalFlags
 from isqa.logger import get_logger
 
 logger = get_logger()
-console = Console()
+# In CI logs (no terminal) rich would wrap at 80 columns; use a wider console
+# there. COLUMNS overrides the width.
+console = Console(
+    width=int(os.environ.get("COLUMNS", "0") or 0)
+    or (None if sys.stdout.isatty() else 160)
+)
 settings = GlobalFlags()
 gitlab_auth_object = None
 
