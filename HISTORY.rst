@@ -5,6 +5,11 @@ History
 0.7.0 (2026-11-16)
 ------------------
 
+* New sort keys ``overdue`` (overdue issues first) and ``due-within:N``
+  (issues due within N days first), combinable with ``priority`` and
+  ``due-date``, e.g. ``--rule "ToDo;Doing = overdue,priority"``.
+  Debug output marks overdue issues.
+
 * ``sort-board-issues --rule '<lists> = <keys>'``: several lists with different
   sort keys in one call. Issues that are in several lists are sorted
   consistently: lists are processed in the given order, issues that belong to

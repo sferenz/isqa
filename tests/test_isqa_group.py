@@ -597,3 +597,67 @@ def test_rules_random_shared_issues(gl, seed):
     S.calls.clear()
     run(*args)
     assert not [c for c in S.calls if c[1].endswith("/reorder")], "second run must not move anything"
+
+
+# --------------------------------------------------------------------------- #
+# overdue / due-within
+# --------------------------------------------------------------------------- #
+
+def _overdue_setup(S):
+    S.labels[("group", 10)] |= {H, M, L, "Doing"}
+    data = [  # (title, due, prio)
+        ("future-low", d(2), L),
+        ("overdue-low", d(-1), L),
+        ("none-high", None, H),
+        ("overdue-none", d(-5), None),
+        ("today-high", d(0), H),       # due today = not overdue
+        ("overdue-high", d(-2), H),
+        ("future-med", d(10), M),
+        ("overdue-med", d(-1), M),
+    ]
+    for k, (title, due, prio) in enumerate(data):
+        add_issue(S, [100, 101][k % 2], ["ToDo"] + ([prio] if prio else []), due=due,
+                  pos=(k + 1) * 10, title=title)
+
+
+def test_sort_overdue_then_priority(gl):
+    S, run = gl
+    _overdue_setup(S)
+    _, out = run("-g", "offis/team", "sort-board-issues", "-P", PRIO, "-r", "ToDo = overdue,priority")
+    assert _titles(S) == ["overdue-high", "overdue-med", "overdue-low", "overdue-none",
+                          "none-high", "today-high", "future-med", "future-low"]
+    S.calls.clear()
+    run("-g", "offis/team", "sort-board-issues", "-P", PRIO, "-r", "ToDo = overdue,priority")
+    assert not [c for c in S.calls if c[1].endswith("/reorder")]
+
+
+def test_sort_overdue_with_fixed_today(gl):
+    S, run = gl
+    _overdue_setup(S)
+    # pretend it is 3 days earlier: only "overdue-none" (d-5) is overdue then
+    fake_today = (TODAY - timedelta(days=3)).isoformat()
+    run("-g", "offis/team", "sort-board-issues", "-P", PRIO, "-r", "ToDo = overdue,priority",
+        extra_env={"ISQA_TODAY": fake_today})
+    assert _titles(S)[0] == "overdue-none"
+    assert _titles(S)[1:4] == ["none-high", "today-high", "overdue-high"]
+
+
+def test_sort_due_within_then_priority(gl):
+    S, run = gl
+    _overdue_setup(S)
+    run("-g", "offis/team", "sort-board-issues", "-P", PRIO, "-r", "ToDo = due-within:2,priority")
+    # due within 2 days (incl. overdue and today): by priority; then the rest by priority
+    # (same priority keeps the manual order: future-low was above overdue-low)
+    assert _titles(S) == ["today-high", "overdue-high", "overdue-med", "future-low", "overdue-low",
+                          "overdue-none", "none-high", "future-med"]
+
+
+def test_overdue_keys_validation_and_debug_output(gl):
+    S, run = gl
+    rc, out = run("-g", "offis/team", "sort-board-issues", "-r", "ToDo = due-within:x", ok=False)
+    assert rc != 0 and "Unknown sort key" in out and "due-within:7" in out
+    rc, out = run("-g", "offis/team", "sort-board-issues", "-r", "ToDo = overdue,overdue", ok=False)
+    assert rc != 0 and "must not repeat" in out
+    _overdue_setup(S)
+    _, out = run("-v", "-g", "offis/team", "sort-board-issues", "-P", PRIO, "-r", "ToDo = overdue,priority")
+    assert "(overdue)" in out and "OVERDUE" in out

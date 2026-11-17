@@ -1,7 +1,7 @@
 import os
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
 import gitlab
@@ -411,7 +411,21 @@ def get_board_label_names(board) -> list:
 # --------------------------------------------------------------------------- #
 
 
-SORT_KEYS = ("due-date", "priority")
+SORT_KEYS = ("due-date", "priority", "overdue", "due-within:<days>")
+
+
+def today() -> "datetime.date":
+    """Current date in UTC (same reference as the due-date checks).
+    Can be overridden with ISQA_TODAY=YYYY-MM-DD (e.g. for tests)."""
+    override = os.environ.get("ISQA_TODAY")
+    if override:
+        return datetime.strptime(override, "%Y-%m-%d").date()
+    return datetime.now(timezone.utc).date()
+
+
+def is_overdue(issue, ref_date=None) -> bool:
+    due = _due_date_of(issue)
+    return due is not None and due < (ref_date or today())
 
 
 def _due_date_of(issue):
@@ -438,11 +452,14 @@ def _target_order(
 
     * due-date: earliest first (latest first with `desc`); no due date at the end
     * priority: order of `priority_labels`; no priority label at the end
+    * overdue: overdue issues (due date before today) first
+    * due-within:N: issues due within the next N days (incl. overdue) first
 
     The sort is stable: issues that are equal in all keys keep their current
     manual order.
     """
     priority_labels = list(priority_labels)
+    ref = today()
 
     def key(issue):
         parts = []
@@ -456,6 +473,12 @@ def _target_order(
                     parts.append((0, -o if desc else o))
             elif k == "priority":
                 parts.append((_priority_rank(issue, priority_labels),))
+            elif k == "overdue":
+                parts.append((0 if is_overdue(issue, ref) else 1,))
+            elif k.startswith("due-within:"):
+                due = _due_date_of(issue)
+                limit = ref + timedelta(days=int(k.split(":", 1)[1]))
+                parts.append((0 if due is not None and due <= limit else 1,))
             else:
                 raise ValueError(f"Unknown sort key: {k}")
         return tuple(parts)
@@ -468,10 +491,19 @@ def parse_sort_by(value: str) -> tuple:
     keys = tuple(k.strip() for k in (value or "").split(",") if k.strip())
     if not keys:
         keys = ("due-date",)
-    unknown = [k for k in keys if k not in SORT_KEYS]
+    def valid(k):
+        if k in ("due-date", "priority", "overdue"):
+            return True
+        if k.startswith("due-within:"):
+            n = k.split(":", 1)[1]
+            return n.isdigit()
+        return False
+
+    unknown = [k for k in keys if not valid(k)]
     if unknown:
         __print_and_fail__(
-            f"Unknown sort key(s) {unknown}. Allowed: {', '.join(SORT_KEYS)}."
+            f"Unknown sort key(s) {unknown}. Allowed: {', '.join(SORT_KEYS)} "
+            "(e.g. 'due-within:7')."
         )
     if len(set(keys)) != len(keys):
         __print_and_fail__(f"Sort keys must not repeat: {value}")
@@ -496,6 +528,8 @@ def _fetch_label_issues(scope: Scope, label_name: str) -> list:
 def describe_issue(issue, priority_labels: tuple = ()) -> str:
     """'#12 "Title" (due 2026-11-20, 11_Prio_High)' - for log output."""
     details = [f"due {issue.due_date}" if issue.due_date else "no due date"]
+    if is_overdue(issue):
+        details[0] += ", OVERDUE"
     prios = [l for l in (issue.labels or []) if l in priority_labels]
     if priority_labels:
         details.append(", ".join(prios) if prios else "no priority")
@@ -513,7 +547,10 @@ def print_issue_order(heading: str, issues: list, priority_labels: tuple = ()):
     if priority_labels:
         table.add_column("Priority", no_wrap=True)
     for n, issue in enumerate(issues, 1):
-        row = [str(n), issue_reference(issue), issue.title, issue.due_date or "-"]
+        due = issue.due_date or "-"
+        if is_overdue(issue):
+            due += " (overdue)"
+        row = [str(n), issue_reference(issue), issue.title, due]
         if priority_labels:
             prios = [l for l in (issue.labels or []) if l in priority_labels]
             row.append(", ".join(prios) or "-")

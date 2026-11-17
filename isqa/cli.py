@@ -589,8 +589,9 @@ def sort_board_issues(
         "--sort-by",
         "-s",
         help="Comma separated sort keys, most important first: 'due-date', "
-        "'priority'. E.g. 'due-date,priority' = by due date, same due date by priority. "
-        "Default for rules without keys.",
+        "'priority', 'overdue' (overdue issues first), 'due-within:N' (issues due "
+        "within N days first). E.g. 'overdue,priority' = overdue issues first, "
+        "both groups by priority. Default for rules without keys.",
     ),
     strict: Annotated[
         bool,

@@ -123,6 +123,11 @@ Here is a list of examples, which demonstrate the core features of the utility:
     ```
 
 * Labels given with `--label` that are not a list on the board are skipped with a warning (use `--strict` to fail instead), so the same configuration can be used for repos with different boards
+* Overdue issues first, each group sorted by priority (`due-within:N` = issues due within the next N days first, overdue ones included)
+    ```
+    isqa sort-board-issues -P "11_Prio_High,12_Prio_Medium,13_Prio_Low" --rule "ToDo;Doing = overdue,priority"
+    ```
+    "Today" is the current date in UTC (override with `ISQA_TODAY=YYYY-MM-DD`).
 * Different sort keys per list in one call (recommended when issues can be in several lists)
     ```
     isqa sort-board-issues -P "11_Prio_High,12_Prio_Medium,13_Prio_Low" \
