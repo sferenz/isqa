@@ -5,6 +5,11 @@ History
 0.7.0 (2026-11-16)
 ------------------
 
+* New command ``comment-issues``: adds a comment once to every issue that
+  matches a condition (``missing-assignee``, ``missing-label``, ``overdue``),
+  e.g. a mention on issues without assignee. Repeats are prevented by an
+  invisible marker in the comment (``--key``).
+
 * New sort keys ``overdue`` (overdue issues first) and ``due-within:N``
   (issues due within N days first), combinable with ``priority`` and
   ``due-date``, e.g. ``--rule "ToDo;Doing = overdue,priority"``.

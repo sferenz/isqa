@@ -661,3 +661,65 @@ def test_overdue_keys_validation_and_debug_output(gl):
     _overdue_setup(S)
     _, out = run("-v", "-g", "offis/team", "sort-board-issues", "-P", PRIO, "-r", "ToDo = overdue,priority")
     assert "(overdue)" in out and "OVERDUE" in out
+
+
+# --------------------------------------------------------------------------- #
+# comment-issues
+# --------------------------------------------------------------------------- #
+
+def _bodies(issue):
+    return [n["body"] for n in issue.get("notes", [])]
+
+
+def test_comment_missing_assignee_once(gl):
+    S, run = gl
+    a = add_issue(S, 100, ["ToDo"], title="Nobody")
+    b = add_issue(S, 101, ["ToDo"], assignee=7, title="Has owner")
+    c = add_issue(S, 102, [], title="Nobody either")
+    e = add_issue(S, 100, [], state="closed", title="Closed")
+    msg = "@sferenz This issue has no assignee yet: {title}"
+    _, out = run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", msg)
+    assert _bodies(a) == ["@sferenz This issue has no assignee yet: Nobody\n\n<!-- isqa:missing-assignee -->"]
+    assert len(_bodies(c)) == 1 and _bodies(b) == [] and _bodies(e) == []
+    assert "Issues commented: 2" in out
+    # second run: no further comments, also with a changed message text
+    S.calls.clear()
+    _, out = run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", "@sferenz other text")
+    assert len(_bodies(a)) == 1 and len(_bodies(c)) == 1
+    assert not [x for x in S.calls if x[0] == "POST"]
+    assert "Issues commented: 0" in out and "already commented before: 2" in out
+    # assigned later and unassigned again -> still no second comment
+    a["assignee_id"] = 7
+    a["assignee_id"] = None
+    run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", msg)
+    assert len(_bodies(a)) == 1
+
+
+def test_comment_existing_other_comments_and_pagination(gl):
+    S, run = gl
+    a = add_issue(S, 100, ["ToDo"], title="Busy issue")
+    a["notes"] = [{"id": n, "body": f"note {n}", "system": False} for n in range(1, 46)]
+    run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", "@sferenz hi")
+    assert len(_bodies(a)) == 46
+    a["notes"].insert(0, a["notes"].pop())  # marker comment now on the first page, order irrelevant
+    run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", "@sferenz hi")
+    assert len(_bodies(a)) == 46
+
+
+def test_comment_keys_labels_dry_run_and_conditions(gl):
+    S, run = gl
+    a = add_issue(S, 100, ["ToDo"], due=d(-2), title="Late")
+    b = add_issue(S, 101, ["Waiting"], due=d(-2), title="Late waiting", assignee=7)
+    c = add_issue(S, 100, [], title="No label")
+    _, out = run("-d", "-g", "offis", "comment-issues", "-c", "overdue", "-m", "late!")
+    assert _bodies(a) == [] and "would comment" in out and "Issues would be commented: 2" in out
+    run("-g", "offis", "comment-issues", "-c", "overdue", "-l", "Waiting", "-m", "{reference} due {due_date}")
+    assert _bodies(a) == [] and _bodies(b)[0].startswith(f"offis/team/beta#1 due {d(-2)}")
+    # different key -> separate comment allowed
+    run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-k", "owner-reminder", "-m", "@sferenz")
+    run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", "@sferenz")
+    assert len(_bodies(a)) == 2 and "<!-- isqa:owner-reminder -->" in _bodies(a)[0]
+    run("-g", "offis", "comment-issues", "-c", "missing-label", "-m", "Line 1\\nLine 2 {unknown}")
+    assert _bodies(c)[-1].startswith("Line 1\nLine 2 {unknown}")
+    rc, out = run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", "x", "-l", "Nope", ok=False)
+    assert rc != 0 and "not found" in out

@@ -71,7 +71,7 @@ class Store:
 
     def issue_json(self, i, group_view=False):
         p = self.projects[i["project_id"]]
-        d = {k: v for k, v in i.items() if k != "relative_position"}
+        d = {k: v for k, v in i.items() if k not in ("relative_position", "notes")}
         d["web_url"] = f"http://fake/{p['path_with_namespace']}/-/issues/{i['iid']}"
         d["references"] = {
             "short": f"#{i['iid']}",
@@ -286,6 +286,28 @@ class Handler(BaseHTTPRequestHandler):
                 headers["Link"] = f'<http://{self.headers["Host"]}{nxt}>; rel="next"'
             headers["X-Total"] = str(len(items))
             return self._send(200, [S.issue_json(i) for i in chunk], headers)
+
+        # issue comments (notes)
+        m = re.fullmatch(r"/issues/(\d+)/notes", rest)
+        if m and kind == "projects":
+            issue = next(
+                i for i in S.issues.values() if i["project_id"] == obj["id"] and i["iid"] == int(m[1])
+            )
+            notes = issue.setdefault("notes", [])
+            if method == "GET":
+                page = int(q.get("page", 1))
+                per_page = int(q.get("per_page", 20))
+                chunk = notes[(page - 1) * per_page: page * per_page]
+                headers = {"X-Total": str(len(notes))}
+                if page * per_page < len(notes):
+                    nxt = self.path.split("?")[0] + "?" + "&".join(
+                        f"{k}={v}" for k, v in {**q, "page": page + 1, "per_page": per_page}.items())
+                    headers["Link"] = f'<http://{self.headers["Host"]}{nxt}>; rel="next"'
+                return self._send(200, chunk, headers)
+            if method == "POST":
+                note = {"id": len(notes) + 1, "body": body.get("body", ""), "system": False}
+                notes.append(note)
+                return self._send(201, note)
 
         # project issue update / reorder
         m = re.fullmatch(r"/issues/(\d+)(/reorder)?", rest)

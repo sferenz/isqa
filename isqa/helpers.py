@@ -202,6 +202,27 @@ def update_issue_labels(issue, add_labels: list = None, remove_labels: list = No
     _project_issues_manager(issue.project_id).update(issue.iid, data)
 
 
+def _project_issue(issue):
+    return _project_issues_manager(issue.project_id).get(issue.iid, lazy=True)
+
+
+def issue_has_comment_with(issue, marker: str) -> bool:
+    """True if one of the issue's comments (notes) contains `marker`."""
+    for note in _project_issue(issue).notes.list(get_all=True, iterator=True):
+        if marker in (getattr(note, "body", "") or ""):
+            return True
+    return False
+
+
+def add_issue_comment(issue, body: str):
+    """Adds a comment (note) to a project or group issue."""
+    _project_issue(issue).notes.create({"body": body})
+
+
+def has_assignee(issue) -> bool:
+    return bool(getattr(issue, "assignees", None)) or getattr(issue, "assignee", None) is not None
+
+
 def reorder_issue(issue, move_before_id: int = None, move_after_id: int = None):
     """Repositions an issue (board order).
 

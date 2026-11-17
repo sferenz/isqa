@@ -113,6 +113,14 @@ Here is a list of examples, which demonstrate the core features of the utility:
     isqa add-default-label --to-label ToDo --board-name Team
     ```
     The default label itself always counts as a column label.
+* Commenting once on issues that match a condition, e.g. mentioning a responsible person on issues without assignee
+    ```
+    isqa comment-issues --condition missing-assignee --message "@jdoe This issue has no assignee yet."
+    ```
+    Conditions: `missing-assignee`, `missing-label`, `overdue`. Optional: `--label` (only issues with one of these labels),
+    `--key` (identifies the comment; default = condition). Placeholders in the message: `{title}`, `{due_date}`,
+    `{reference}`, `{url}`; `\n` = line break. An invisible marker (`<!-- isqa:<key> -->`) in the comment makes sure
+    every issue gets the comment only once, also if the message text is changed later.
 * Sorting the issues on a board within the label `projects` (issues without due date are placed at the end; issues with the same due date keep their manual order)
     ```
     isqa sort-board-issues --label projects

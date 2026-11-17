@@ -20,7 +20,13 @@ from isqa.helpers import (
     get_assignee_data,
     get_board,
     get_board_label_names,
+    describe_issue,
     get_gitlab_scope,
+    issue_reference,
+    add_issue_comment,
+    has_assignee,
+    issue_has_comment_with,
+    is_overdue,
     label_exists,
     sort_board_lists,
     parse_priority_labels,
@@ -721,6 +727,131 @@ def sort_board_issues(
                 for line in res["conflicts"]:
                     console.print("    -", line)
                     logger.warning(f"    - {line}")
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        __print_and_fail__(f"An unexpected error occurred: {e}")
+
+
+class CommentConditionChoice(str, Enum):
+    missing_assignee = "missing-assignee"
+    missing_label = "missing-label"
+    overdue = "overdue"
+
+
+class _SafeDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+@app.command()
+def comment_issues(
+    condition: CommentConditionChoice = typer.Option(
+        ...,
+        "--condition",
+        "-c",
+        help="Which issues get the comment: 'missing-assignee', 'missing-label' "
+        "or 'overdue' (due date before today).",
+    ),
+    message: str = typer.Option(
+        ...,
+        "--message",
+        "-m",
+        help="Comment text (Markdown), e.g. '@jdoe This issue has no assignee.' "
+        "Placeholders: {title}, {due_date}, {reference}, {url}.",
+    ),
+    key: Optional[str] = typer.Option(
+        None,
+        "--key",
+        "-k",
+        help="Identifies the comment (invisible marker). Every issue gets a comment "
+        "with the same key only once. Defaults to the condition.",
+    ),
+    label: Optional[list[str]] = typer.Option(
+        None,
+        "--label",
+        "-l",
+        help="Only issues that have this label. Can be given multiple times "
+        "(issue needs one of them).",
+    ),
+    state: str = typer.Option(
+        "opened",
+        "--state",
+        "-s",
+        help="Filter issues by state: opened, closed, or all.",
+    ),
+):
+    """
+    Adds a comment ONCE to every issue that matches a condition, e.g. a mention
+    of a responsible person on issues without assignee. Issues that already
+    have a comment with the same key are skipped, also in later runs.
+    """
+    marker_key = key or condition.value
+    marker = f"<!-- isqa:{marker_key} -->"
+
+    scope, scope_name = get_gitlab_scope()
+
+    for name in label or []:
+        check_if_label_exists(scope, name)
+
+    conditions = {
+        CommentConditionChoice.missing_assignee: lambda i: not has_assignee(i),
+        CommentConditionChoice.missing_label: lambda i: not i.labels,
+        CommentConditionChoice.overdue: lambda i: is_overdue(i),
+    }
+    matches = conditions[condition]
+    wanted_labels = set(label or [])
+
+    console.print(
+        "Comment", Text(f"'{marker_key}'", style="bold yellow"),
+        "on", Text(state, style="bold yellow"), "issues with condition",
+        Text(condition.value, style="bold yellow"), "in", Text(scope_name, style="bold green"),
+    )
+
+    try:
+        commented, skipped = 0, 0
+        for issue in scope.issues.list(state=state, get_all=True, iterator=True):
+            if not matches(issue):
+                continue
+            if wanted_labels and not wanted_labels.intersection(issue.labels or []):
+                continue
+
+            if issue_has_comment_with(issue, marker):
+                skipped += 1
+                if settings.verbose:
+                    console.print(
+                        "  already commented:",
+                        Text(describe_issue(issue), style="dim"),
+                    )
+                continue
+
+            body = message.replace("\\n", "\n").format_map(_SafeDict(
+                title=issue.title,
+                due_date=issue.due_date or "",
+                reference=issue_reference(issue),
+                url=issue.web_url,
+            ))
+            body = f"{body}\n\n{marker}"
+
+            if settings.dry_run:
+                console.print(
+                    Text("  [dry-run] would comment on", style="bold yellow"),
+                    Text(describe_issue(issue), style="blue"),
+                )
+            else:
+                add_issue_comment(issue, body)
+                console.print(
+                    Text("  ✅ commented on", style="bold green"),
+                    Text(describe_issue(issue), style="blue"),
+                )
+            commented += 1
+
+        verb = "would be commented" if settings.dry_run else "commented"
+        console.print(
+            f"\nIssues {verb}:", Text(str(commented), style="bold cyan"),
+            "| already commented before:", Text(str(skipped), style="bold cyan"),
+        )
 
     except typer.Exit:
         raise
