@@ -5,6 +5,11 @@ History
 0.7.0 (2026-11-16)
 ------------------
 
+* ``sort-board-issues``: labels given with ``--label`` that are not a list on
+  the board (or do not exist) are skipped with a warning instead of failing;
+  ``--strict`` restores the old behaviour. Fails only if none of them is a list.
+* Plain-text email templates are now part of the package.
+
 * Support GitLab groups: ``--group`` / ``GITLAB_GROUP_ID`` for all commands
   (group issues, group boards, group labels; changes are written via the
   issue's project).

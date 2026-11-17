@@ -165,11 +165,32 @@ def test_project_mode_still_works(gl):
 def test_unknown_label_or_board_fails(gl):
     S, run = gl
     rc, out = run("-g", "offis/team", "sort-board-issues", "-l", "Nope", ok=False)
-    assert rc != 0 and "not found" in out
+    assert rc != 0 and "None of the given labels" in out
     rc, out = run("-g", "offis/team", "sort-board-issues", "-n", "Nope", ok=False)
     assert rc != 0 and "not found" in out
     rc, out = run("-g", "offis/team", "sort-board-issues", "-n", "Team", "-l", "TODO_Date", ok=False)
+    assert rc != 0 and "None of the given labels" in out
+    # --strict: fail as before
+    rc, out = run("-g", "offis/team", "sort-board-issues", "--strict", "-l", "ToDo", "-l", "Nope", ok=False)
+    assert rc != 0 and "not found" in out
+    rc, out = run("-g", "offis/team", "sort-board-issues", "--strict", "-n", "Team", "-l", "ToDo",
+                  "-l", "TODO_Date", ok=False)
     assert rc != 0 and "not used as lists" in out
+
+
+def test_missing_columns_are_skipped_with_warning(gl):
+    S, run = gl
+    for k, due in enumerate([d(5), d(1), d(3)]):
+        add_issue(S, 100, ["ToDo"], due=due, pos=(k + 1) * 10)
+    for k, due in enumerate([d(9), d(2)]):
+        add_issue(S, 101, ["Waiting"], due=due, pos=(k + 1) * 100)
+    rc, out = run("-g", "offis/team", "sort-board-issues", "-n", "Team",
+                  "-l", "ToDo", "-l", "TODO_Date", "-l", "Nope", "-l", "Waiting")
+    assert rc == 0
+    assert "Label 'TODO_Date' is not a list on board 'Team' - skipped" in out
+    assert "Label 'Nope' does not exist (typo?)" in out
+    assert [S.issues[i]["due_date"] for i in list_order(S, "ToDo")] == [d(1), d(3), d(5)]
+    assert [S.issues[i]["due_date"] for i in list_order(S, "Waiting")] == [d(2), d(9)]
 
 
 def test_group_migrate(gl):

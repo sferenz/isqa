@@ -21,6 +21,7 @@ from isqa.helpers import (
     get_board,
     get_board_label_names,
     get_gitlab_scope,
+    label_exists,
     parse_priority_labels,
     parse_sort_by,
     print_issue_to_console,
@@ -567,6 +568,14 @@ def sort_board_issues(
         help="Comma separated sort keys, most important first: 'due-date', "
         "'priority'. E.g. 'due-date,priority' = by due date, same due date by priority.",
     ),
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict",
+            help="Fail if a given --label does not exist or is not a list on the "
+            "board. Default: skip such labels with a warning.",
+        ),
+    ] = False,
     priority_labels: Optional[str] = typer.Option(
         None,
         "--priority-labels",
@@ -593,8 +602,14 @@ def sort_board_issues(
 
     scope, _ = get_gitlab_scope()
 
-    for name in list(label or []) + (list(prio_labels) if "priority" in sort_keys else []):
+    # priority labels must exist, otherwise the priority order would be wrong
+    for name in prio_labels if "priority" in sort_keys else []:
         check_if_label_exists(scope, name)
+
+    requested = list(dict.fromkeys(label or []))  # unique, keep order
+    if strict:
+        for name in requested:
+            check_if_label_exists(scope, name)
 
     console.print(
         "Sort by:",
@@ -618,13 +633,29 @@ def sort_board_issues(
             )
             return
 
-        if label:
-            missing = [name for name in label if name not in label_names]
-            if missing:
+        if requested:
+            missing = [name for name in requested if name not in label_names]
+            if missing and strict:
                 __print_and_fail__(
                     f"Label(s) {missing} are not used as lists on board '{board.name}'."
                 )
-            label_names = [name for name in label_names if name in label]
+            for name in missing:
+                reason = (
+                    "is not a list on board"
+                    if label_exists(scope, name)
+                    else "does not exist (typo?) and is not a list on board"
+                )
+                console.print(
+                    Text("⚠️  WARNING:", style="bold yellow"),
+                    f"Label '{name}' {reason} '{board.name}' - skipped.",
+                )
+                logger.warning(f"Label '{name}' {reason} '{board.name}' - skipped.")
+            label_names = [name for name in label_names if name in requested]
+            if not label_names:
+                __print_and_fail__(
+                    f"None of the given labels {requested} is a list on board "
+                    f"'{board.name}'. Check the label names and the board."
+                )
 
         for list_label_name in label_names:
             console.print(

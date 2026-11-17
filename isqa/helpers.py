@@ -320,6 +320,15 @@ def get_assignee_data(issue):
     return assignee, assignee_email
 
 
+def label_exists(scope: Scope, label_name: str) -> bool:
+    """True if the label exists in the project/group (incl. parent groups)."""
+    try:
+        scope.labels.get(label_name)
+        return True
+    except gitlab.GitlabGetError:
+        return False
+
+
 def check_if_label_exists(scope: Scope, label_name: str):
     """
     Checks if a label with the given name exists in the GitLab project or group

@@ -122,6 +122,7 @@ Here is a list of examples, which demonstrate the core features of the utility:
     isqa sort-board-issues --label projects --descending
     ```
 
+* Labels given with `--label` that are not a list on the board are skipped with a warning (use `--strict` to fail instead), so the same configuration can be used for repos with different boards
 * Sorting several lists of a board at once
     ```
     isqa sort-board-issues --board-name Team --label ToDo --label "In Progress"
