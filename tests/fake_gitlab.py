@@ -333,6 +333,8 @@ class Handler(BaseHTTPRequestHandler):
                 if "labels" in body:
                     labels = [l for l in str(body["labels"]).split(",") if l]
                 issue["labels"] = labels
+                if "due_date" in body:
+                    issue["due_date"] = body["due_date"] or None
                 return self._send(200, S.issue_json(issue))
 
         return self._send(404, {"message": f"404 not implemented {method} {path}"})

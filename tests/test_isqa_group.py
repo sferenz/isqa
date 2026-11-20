@@ -723,3 +723,55 @@ def test_comment_keys_labels_dry_run_and_conditions(gl):
     assert _bodies(c)[-1].startswith("Line 1\nLine 2 {unknown}")
     rc, out = run("-g", "offis", "comment-issues", "-c", "missing-assignee", "-m", "x", "-l", "Nope", ok=False)
     assert rc != 0 and "not found" in out
+
+
+# --------------------------------------------------------------------------- #
+# migrate-issues --days-ahead / --remove-due-date
+# --------------------------------------------------------------------------- #
+
+def _migrate(run, label, *extra, dry=False, ok=True):
+    pre = ["-d"] if dry else []
+    return run(*pre, "-g", "offis", "migrate-issues", "-f", label, "-t", "ToDo",
+               "--check-condition", "due-date", *extra, ok=ok)
+
+
+def test_migrate_days_ahead(gl):
+    S, run = gl
+    S.labels[("group", 10)] |= {"Wait"}
+    y = add_issue(S, 100, ["Wait"], due=d(-1), title="yesterday")
+    t0 = add_issue(S, 100, ["Wait"], due=d(0), title="today")
+    t1 = add_issue(S, 100, ["Wait"], due=d(1), title="tomorrow")
+    t2 = add_issue(S, 100, ["Wait"], due=d(2), title="in two days")
+    _migrate(run, "Wait")                      # default 0: yesterday or earlier
+    assert y["labels"] == ["ToDo"] and t0["labels"] == ["Wait"]
+    _, out = _migrate(run, "Wait", "--days-ahead", "1")   # today or earlier
+    assert t0["labels"] == ["ToDo"] and t1["labels"] == ["Wait"]
+    assert f"due date before {d(1)}" in out
+    _migrate(run, "Wait", "--days-ahead", "3")  # within the next 2 days
+    assert t1["labels"] == ["ToDo"] and t2["labels"] == ["ToDo"]
+    rc, out = _migrate(run, "Wait", "--days-ahead", "-1", ok=False)
+    assert rc != 0
+
+
+def test_migrate_remove_due_date(gl):
+    S, run = gl
+    S.labels[("group", 10)] |= {"Wait"}
+    a = add_issue(S, 100, ["Wait", "prio"], due=d(-2), title="late")
+    b = add_issue(S, 100, ["Wait"], due=d(5), title="future")
+    _, out = _migrate(run, "Wait", "--remove-due-date", dry=True)
+    assert a["due_date"] == d(-2) and "and remove due date" in out
+    _, out = _migrate(run, "Wait", "--remove-due-date")
+    assert a["labels"] == ["prio", "ToDo"] and a["due_date"] is None and "(due date removed)" in out
+    assert b["due_date"] == d(5) and b["labels"] == ["Wait"]
+    c = add_issue(S, 100, ["Wait"], due=d(-2), title="keep date")
+    _migrate(run, "Wait")
+    assert c["labels"] == ["ToDo"] and c["due_date"] == d(-2)
+
+
+def test_migrate_uses_isqa_today(gl):
+    S, run = gl
+    S.labels[("group", 10)] |= {"Wait"}
+    a = add_issue(S, 100, ["Wait"], due=d(-1))
+    run("-g", "offis", "migrate-issues", "-f", "Wait", "-t", "ToDo", "--check-condition", "due-date",
+        extra_env={"ISQA_TODAY": d(-5)})
+    assert a["labels"] == ["Wait"]

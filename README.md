@@ -121,6 +121,11 @@ Here is a list of examples, which demonstrate the core features of the utility:
     `--key` (identifies the comment; default = condition). Placeholders in the message: `{title}`, `{due_date}`,
     `{reference}`, `{url}`; `\n` = line break. An invisible marker (`<!-- isqa:<key> -->`) in the comment makes sure
     every issue gets the comment only once, also if the message text is changed later.
+* Migrating issues already on (or before) the due date, and removing the due date of migrated issues
+    ```
+    # due date today or earlier (default --days-ahead 0 = yesterday or earlier)
+    isqa migrate-issues --from-label Wait --to-label ToDo --check-condition due-date --days-ahead 1 --remove-due-date
+    ```
 * Sorting the issues on a board within the label `projects` (issues without due date are placed at the end; issues with the same due date keep their manual order)
     ```
     isqa sort-board-issues --label projects

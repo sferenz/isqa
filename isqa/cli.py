@@ -1,6 +1,6 @@
 import os
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
@@ -14,6 +14,7 @@ from typing_extensions import Annotated
 from isqa.common import __save_json__
 from isqa.configs import console, logger, settings
 from isqa.exceptions import IsQAWrongCLIParams
+from isqa.helpers import today as helpers_today
 from isqa.helpers import (
     __print_and_fail__,
     check_if_label_exists,
@@ -54,7 +55,8 @@ class MigrationConditionChoice(str, Enum):
 
 
 def _today_utc():
-    return datetime.now(timezone.utc).date()
+    """Today in UTC (ISQA_TODAY=YYYY-MM-DD overrides, see helpers.today)."""
+    return helpers_today()
 
 
 def _due_date_expired(issue, today) -> bool:
@@ -348,10 +350,26 @@ def migrate_issues(
         "--check-condition",
         help="Specific condition to check before migrating labels.",
     ),
+    days_ahead: int = typer.Option(
+        0,
+        "--days-ahead",
+        min=0,
+        help="For 'due-date': migrate once the due date is less than N days away. "
+        "0 = due date yesterday or earlier (default), 1 = due date today or "
+        "earlier, 3 = due date within the next 2 days or earlier.",
+    ),
+    remove_due_date: Annotated[
+        bool,
+        typer.Option(
+            "--remove-due-date",
+            help="Also remove the due date of migrated issues.",
+        ),
+    ] = False,
 ):
     """
     Migrates issues from one label to another label. Each issue must meet
-    specific conditions (e.g., 'due-date' = due date is before today).
+    specific conditions (e.g., 'due-date' = due date is before today, or
+    earlier with --days-ahead). Optionally removes the due date.
     """
 
     if not from_label or not to_label:
@@ -378,7 +396,15 @@ def migrate_issues(
             state=state, labels=[from_label], get_all=True, iterator=True
         )
         issue_data = []
-        today = _today_utc()
+        # due date < today + days_ahead  <=>  due date at most (days_ahead - 1) days away
+        limit = _today_utc() + timedelta(days=days_ahead)
+        if check_condition == MigrationConditionChoice.due_date:
+            console.print(
+                "Condition: due date before",
+                Text(limit.isoformat(), style="bold yellow"),
+                f"(--days-ahead {days_ahead})",
+                *(["| due date will be removed"] if remove_due_date else []),
+            )
 
         for issue in issues:
             if from_label not in (issue.labels or []):
@@ -386,7 +412,7 @@ def migrate_issues(
 
             condition_satisfied = False
             if check_condition == MigrationConditionChoice.due_date:
-                condition_satisfied = _due_date_expired(issue, today)
+                condition_satisfied = _due_date_expired(issue, limit)
 
             if not condition_satisfied:
                 continue
@@ -400,16 +426,23 @@ def migrate_issues(
                     Text(f"'{from_label}'", style="bold blue"),
                     "->",
                     Text(f"'{to_label}'", style="bold green"),
+                    *(["and remove due date"] if remove_due_date else []),
                 )
                 continue
 
-            update_issue_labels(issue, add_labels=[to_label], remove_labels=[from_label])
+            update_issue_labels(
+                issue,
+                add_labels=[to_label],
+                remove_labels=[from_label],
+                remove_due_date=remove_due_date,
+            )
             console.print(
                 Text("✅", style="bold green"),
                 Text("Issue labels updated successfully from ->", style="bold white"),
                 Text(f"'{from_label}'", style="bold blue"),
                 "to",
                 Text(f"'{to_label}'", style="bold green"),
+                *(["(due date removed)"] if remove_due_date else []),
             )
 
         if not issue_data:

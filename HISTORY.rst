@@ -5,6 +5,11 @@ History
 0.7.0 (2026-11-16)
 ------------------
 
+* ``migrate-issues --days-ahead N``: migrate once the due date is less than N
+  days away (0 = yesterday or earlier, default; 1 = today or earlier).
+* ``migrate-issues --remove-due-date``: remove the due date of migrated issues.
+* ``migrate-issues`` uses the same "today" (UTC, ``ISQA_TODAY``) as sorting.
+
 * New command ``comment-issues``: adds a comment once to every issue that
   matches a condition (``missing-assignee``, ``missing-label``, ``overdue``),
   e.g. a mention on issues without assignee. Repeats are prevented by an

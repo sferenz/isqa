@@ -190,9 +190,14 @@ def issue_reference(issue) -> str:
     return f"#{issue.iid}"
 
 
-def update_issue_labels(issue, add_labels: list = None, remove_labels: list = None):
-    """Adds/removes labels of a project or group issue (other labels are kept)."""
+def update_issue_labels(
+    issue, add_labels: list = None, remove_labels: list = None, remove_due_date: bool = False
+):
+    """Adds/removes labels of a project or group issue (other labels are kept).
+    Optionally removes the due date in the same update."""
     data = {}
+    if remove_due_date:
+        data["due_date"] = None
     if add_labels:
         data["add_labels"] = ",".join(add_labels)
     if remove_labels:
