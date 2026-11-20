@@ -79,9 +79,11 @@ class Store:
             "full": f"{p['path_with_namespace']}#{i['iid']}",
         }
         a = i.get("assignee_id")
-        d["assignee"] = self.users[a] if a else None
-        d["assignees"] = [self.users[a]] if a else []
+        ids = i.get("assignee_ids") or ([a] if a else [])
+        d["assignee"] = self.users[ids[0]] if ids else None
+        d["assignees"] = [self.users[x] for x in ids]
         d.pop("assignee_id", None)
+        d.pop("assignee_ids", None)
         return d
 
     def ordered(self, issues):
@@ -201,6 +203,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/user", path)
         if m:
             return self._send(200, {"id": 1, "username": "bot"})
+
+        if path == "/users" and method == "GET":
+            name = q.get("username", "").lower()
+            return self._send(200, [u for u in S.users.values() if u["username"].lower() == name])
 
         m = re.fullmatch(r"/users/(\d+)", path)
         if m:

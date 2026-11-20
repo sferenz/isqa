@@ -5,6 +5,12 @@ History
 0.7.0 (2026-11-16)
 ------------------
 
+* ``migrate-issues --to-label-for USERNAME=LABEL``: issues assigned to a
+  specific user are migrated to a different label (first matching mapping
+  wins; unknown usernames are reported).
+* ``migrate-issues --keep-due-date-for-mapped``: issues migrated via an
+  assignee mapping keep their due date, also with ``--remove-due-date``.
+
 * ``migrate-issues --days-ahead N``: migrate once the due date is less than N
   days away (0 = yesterday or earlier, default; 1 = today or earlier).
 * ``migrate-issues --remove-due-date``: remove the due date of migrated issues.

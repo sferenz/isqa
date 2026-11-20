@@ -25,6 +25,8 @@ from isqa.helpers import (
     get_gitlab_scope,
     issue_reference,
     add_issue_comment,
+    assignee_usernames,
+    user_exists,
     has_assignee,
     issue_has_comment_with,
     is_overdue,
@@ -365,6 +367,21 @@ def migrate_issues(
             help="Also remove the due date of migrated issues.",
         ),
     ] = False,
+    to_label_for: Optional[list[str]] = typer.Option(
+        None,
+        "--to-label-for",
+        help="'USERNAME=LABEL': issues assigned to this user are migrated to LABEL "
+        "instead of --to-label. Can be given multiple times; with several "
+        "matching assignees the first mapping wins.",
+    ),
+    keep_due_date_for_mapped: Annotated[
+        bool,
+        typer.Option(
+            "--keep-due-date-for-mapped",
+            help="Issues migrated via --to-label-for keep their due date, even "
+            "with --remove-due-date.",
+        ),
+    ] = False,
 ):
     """
     Migrates issues from one label to another label. Each issue must meet
@@ -379,8 +396,33 @@ def migrate_issues(
 
     scope, scope_name = get_gitlab_scope()
 
+    # per-assignee target labels: [(username, label), ...] in the given order
+    assignee_targets = []
+    for mapping in to_label_for or []:
+        if "=" not in mapping:
+            __print_and_fail__(
+                f"Invalid --to-label-for '{mapping}', expected 'USERNAME=LABEL'."
+            )
+        user, target = (x.strip() for x in mapping.split("=", 1))
+        user = user.lstrip("@").lower()
+        if not user or not target:
+            __print_and_fail__(
+                f"Invalid --to-label-for '{mapping}', expected 'USERNAME=LABEL'."
+            )
+        assignee_targets.append((user, target))
+
     check_if_label_exists(scope, from_label)
     check_if_label_exists(scope, to_label)
+    for user, target in assignee_targets:
+        check_if_label_exists(scope, target)
+        if not user_exists(user):
+            msg = f"User '{user}' (--to-label-for) not found on GitLab - typo?"
+            console.print(Text("⚠️  WARNING:", style="bold yellow"), msg)
+            logger.warning(msg)
+        console.print(
+            "Issues assigned to", Text(user, style="bold yellow"), "->",
+            Text(f"'{target}'", style="bold green"),
+        )
 
     console.print(
         "Get",
@@ -420,29 +462,37 @@ def migrate_issues(
             print_issue_to_console(issue)
             issue_data.append(issue.asdict())
 
+            target_label, mapped = to_label, False
+            usernames = assignee_usernames(issue)
+            for user, target in assignee_targets:
+                if user in usernames:
+                    target_label, mapped = target, True
+                    break
+            drop_due_date = remove_due_date and not (mapped and keep_due_date_for_mapped)
+
             if settings.dry_run:
                 console.print(
                     Text("  [dry-run] would migrate", style="bold yellow"),
                     Text(f"'{from_label}'", style="bold blue"),
                     "->",
-                    Text(f"'{to_label}'", style="bold green"),
-                    *(["and remove due date"] if remove_due_date else []),
+                    Text(f"'{target_label}'", style="bold green"),
+                    *(["and remove due date"] if drop_due_date else []),
                 )
                 continue
 
             update_issue_labels(
                 issue,
-                add_labels=[to_label],
+                add_labels=[target_label],
                 remove_labels=[from_label],
-                remove_due_date=remove_due_date,
+                remove_due_date=drop_due_date,
             )
             console.print(
                 Text("✅", style="bold green"),
                 Text("Issue labels updated successfully from ->", style="bold white"),
                 Text(f"'{from_label}'", style="bold blue"),
                 "to",
-                Text(f"'{to_label}'", style="bold green"),
-                *(["(due date removed)"] if remove_due_date else []),
+                Text(f"'{target_label}'", style="bold green"),
+                *(["(due date removed)"] if drop_due_date else []),
             )
 
         if not issue_data:

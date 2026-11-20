@@ -126,6 +126,12 @@ Here is a list of examples, which demonstrate the core features of the utility:
     # due date today or earlier (default --days-ahead 0 = yesterday or earlier)
     isqa migrate-issues --from-label Wait --to-label ToDo --check-condition due-date --days-ahead 1 --remove-due-date
     ```
+* Migrating issues of specific assignees to a different label (optionally keeping their due date)
+    ```
+    isqa migrate-issues --from-label "Termin durchführen" --to-label ToDo --check-condition due-date \
+        --to-label-for aniesse=Info_ANi --remove-due-date --keep-due-date-for-mapped
+    ```
+    `--to-label-for USERNAME=LABEL` can be given multiple times; if several assignees match, the first mapping wins.
 * Sorting the issues on a board within the label `projects` (issues without due date are placed at the end; issues with the same due date keep their manual order)
     ```
     isqa sort-board-issues --label projects

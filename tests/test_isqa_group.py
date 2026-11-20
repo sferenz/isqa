@@ -775,3 +775,76 @@ def test_migrate_uses_isqa_today(gl):
     run("-g", "offis", "migrate-issues", "-f", "Wait", "-t", "ToDo", "--check-condition", "due-date",
         extra_env={"ISQA_TODAY": d(-5)})
     assert a["labels"] == ["Wait"]
+
+
+# --------------------------------------------------------------------------- #
+# migrate-issues --to-label-for / --keep-due-date-for-mapped
+# --------------------------------------------------------------------------- #
+
+def _assignee_setup(S):
+    S.labels[("group", 10)] |= {"Termin durchführen", "Info_ANi", "Info_SFz"}
+    S.users[20] = {"id": 20, "name": "A. Niesse", "username": "aniesse", "public_email": ""}
+    S.users[21] = {"id": 21, "name": "S. Ferenz", "username": "sferenz", "public_email": ""}
+    issues = {
+        "ani": add_issue(S, 100, ["Termin durchführen"], due=d(-1), assignee=20, title="ani"),
+        "max": add_issue(S, 100, ["Termin durchführen"], due=d(-1), assignee=7, title="max"),
+        "none": add_issue(S, 101, ["Termin durchführen"], due=d(-1), title="none"),
+        "future": add_issue(S, 101, ["Termin durchführen"], due=d(3), assignee=20, title="future"),
+        "both": add_issue(S, 102, ["Termin durchführen"], due=d(-1), title="both"),
+    }
+    issues["both"]["assignee_ids"] = [21, 20]  # sferenz first, aniesse second
+    return issues
+
+
+def _migrate_termin(run, *extra, ok=True, dry=False):
+    pre = ["-d"] if dry else []
+    return run(*pre, "-g", "offis", "migrate-issues", "-f", "Termin durchführen", "-t", "ToDo",
+               "--check-condition", "due-date", *extra, ok=ok)
+
+
+def test_migrate_to_label_for_assignee(gl):
+    S, run = gl
+    i = _assignee_setup(S)
+    _, out = _migrate_termin(run, "--to-label-for", "aniesse=Info_ANi")
+    assert i["ani"]["labels"] == ["Info_ANi"]
+    assert i["max"]["labels"] == ["ToDo"] and i["none"]["labels"] == ["ToDo"]
+    assert i["future"]["labels"] == ["Termin durchführen"]
+    assert i["both"]["labels"] == ["Info_ANi"]          # any assignee matches
+    assert "Issues assigned to aniesse" in out
+
+
+def test_migrate_to_label_for_first_mapping_wins_and_case(gl):
+    S, run = gl
+    i = _assignee_setup(S)
+    _migrate_termin(run, "--to-label-for", "@SFerenz=Info_SFz", "--to-label-for", "aniesse=Info_ANi")
+    assert i["both"]["labels"] == ["Info_SFz"] and i["ani"]["labels"] == ["Info_ANi"]
+
+
+def test_migrate_keep_due_date_for_mapped(gl):
+    S, run = gl
+    i = _assignee_setup(S)
+    _, out = _migrate_termin(run, "--to-label-for", "aniesse=Info_ANi", "--remove-due-date",
+                             "--keep-due-date-for-mapped", dry=True)
+    assert i["ani"]["labels"] == ["Termin durchführen"]
+    _migrate_termin(run, "--to-label-for", "aniesse=Info_ANi", "--remove-due-date", "--keep-due-date-for-mapped")
+    assert i["ani"]["labels"] == ["Info_ANi"] and i["ani"]["due_date"] == d(-1)
+    assert i["max"]["labels"] == ["ToDo"] and i["max"]["due_date"] is None
+
+
+def test_migrate_mapped_due_date_removed_without_keep_flag(gl):
+    S, run = gl
+    i = _assignee_setup(S)
+    _migrate_termin(run, "--to-label-for", "aniesse=Info_ANi", "--remove-due-date")
+    assert i["ani"]["labels"] == ["Info_ANi"] and i["ani"]["due_date"] is None
+
+
+def test_migrate_to_label_for_validation(gl):
+    S, run = gl
+    i = _assignee_setup(S)
+    rc, out = _migrate_termin(run, "--to-label-for", "aniesse", ok=False)
+    assert rc != 0 and "expected 'USERNAME=LABEL'" in out
+    rc, out = _migrate_termin(run, "--to-label-for", "aniesse=Info_ANX", ok=False)
+    assert rc != 0 and "not found" in out and i["ani"]["labels"] == ["Termin durchführen"]
+    _, out = _migrate_termin(run, "--to-label-for", "anniese=Info_ANi")
+    assert "User 'anniese'" in out and "typo?" in out
+    assert i["ani"]["labels"] == ["ToDo"]

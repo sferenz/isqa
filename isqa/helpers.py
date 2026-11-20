@@ -224,6 +224,23 @@ def add_issue_comment(issue, body: str):
     _project_issue(issue).notes.create({"body": body})
 
 
+def assignee_usernames(issue) -> list:
+    """Usernames of all assignees of an issue (lower case, in GitLab's order)."""
+    people = list(getattr(issue, "assignees", None) or [])
+    single = getattr(issue, "assignee", None)
+    if not people and single:
+        people = [single]
+    return [p.get("username", "").lower() for p in people if p and p.get("username")]
+
+
+def user_exists(username: str) -> bool:
+    """True if a GitLab user with this username exists."""
+    try:
+        return bool(gitlab_auth_object.users.list(username=username))
+    except Exception:
+        return True  # cannot check (e.g. missing permission) -> do not warn
+
+
 def has_assignee(issue) -> bool:
     return bool(getattr(issue, "assignees", None)) or getattr(issue, "assignee", None) is not None
 
